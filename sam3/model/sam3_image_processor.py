@@ -45,19 +45,40 @@ class Sam3Processor:
             state = {}
 
         if isinstance(image, PIL.Image.Image):
+            # if image is a PIL image, get the height and width directly
             width, height = image.size
         elif isinstance(image, (torch.Tensor, np.ndarray)):
+            # if image is a tensor or numpy array, get the height and width from the shape
             height, width = image.shape[-2:]
         else:
             raise ValueError("Image must be a PIL image or a tensor")
 
+        # convert all kinds of input formats into standardized PyTorch tensor
         image = v2.functional.to_image(image).to(self.device)
+        # apply transforms to the image and add batch dimension [3, 1008, 1008]->[1, 3, 1008, 1008]
         image = self.transform(image).unsqueeze(0)
-
         state["original_height"] = height
         state["original_width"] = width
+
         state["backbone_out"] = self.model.backbone.forward_image(image)
+        # forward through the SAM3VLBackbone(vl_combiner.py), the shape of output:
+        # backbone_out = {
+        #     "vision_features": sam3_src, # [1, 256, 72, 72]
+        #     "vision_pos_enc": sam3_pos, # [[1, 256, 288, 288],[1, 256, 144, 144],[1, 256, 72, 72]]
+        #     "backbone_fpn": sam3_features, # [[1, 256, 288, 288],[1, 256, 144, 144],[1, 256, 72, 72]]
+        #     "sam2_backbone_out": sam2_output, # None
+        # }
+        # The shape of vision_pos_enc and backbone_fpn is determined by the scalp parameter in _create_vl_backbone (model_builder.py)
+        # - scalp=1: discards the lowest resolution features, keeping 3 levels (shapes: [288x288], [144x144], [72x72])
+        # - scalp=0: keeps all 4 feature levels (shapes: [288x288], [144x144], [72x72], [36x36])
+
+        # inst_interactive_predictor enables Interactive Instance Segmentation (like SAM1/SAM2)
+        # by default inst_interactive_predictor is None, so the model only supports zero-shot segmentation based on text prompts
         inst_interactivity_en = self.model.inst_interactive_predictor is not None
+
+        # sam2_backbone_out is None by default because:
+        # 1. When sam2_features is None or sam2_pos is None, sam2_output remains None (see necks.py:110)
+        # 2. This is typical for SAM3 models that don't require SAM2's backbone features
         if inst_interactivity_en and "sam2_backbone_out" in state["backbone_out"]:
             sam2_backbone_out = state["backbone_out"]["sam2_backbone_out"]
             sam2_backbone_out["backbone_fpn"][0] = (
@@ -113,14 +134,57 @@ class Sam3Processor:
     def set_text_prompt(self, prompt: str, state: Dict):
         """Sets the text prompt and run the inference"""
 
+        # Ensure that vision features have been extracted before setting the text prompt
         if "backbone_out" not in state:
             raise ValueError("You must call set_image before set_text_prompt")
 
         text_outputs = self.model.backbone.forward_text([prompt], device=self.device)
+        # the shape of text_outputs:
+        # text_outputs = {
+        #     "language_features": [32, 1, 256],
+        #     "language_mask": [1, 32],
+        #     "language_embeds": [32, 1, 1024],
+        # }
+
         # will erase the previous text prompt if any
         state["backbone_out"].update(text_outputs)
+        for key in state["backbone_out"]:
+            # if state["backbone_out"][key] is not None:
+            print(key)
+        # the shape of state:
+        # state = {
+        #     "original_heights": height,
+        #     "original_widths": width,
+        #     "backbone_out": {
+        #         "vision_features": [1, 256, 72, 72],
+        #         "vision_pos_enc": [
+        #             [1, 256, 288, 288],
+        #             [1, 256, 144, 144],
+        #             [1, 256, 72, 72],
+        #         ],
+        #         "backbone_fpn": [
+        #             [1, 256, 288, 288],
+        #             [1, 256, 144, 144],
+        #             [1, 256, 72, 72],
+        #         ],
+        #         "sam2_backbone_out": None,
+        #         "language_features": [32, 1, 256],
+        #         "language_mask": [1, 32],
+        #         "language_embeds": [32, 1, 1024],
+        #     },
+        # }
+
+        # geometric_prompt represents user-provided geometric prompts (besides text prompt)
+        # including: boxes (bounding boxes), points (click points), masks (mask prompts)
+        # If not provided, create a dummy prompt with empty geometric inputs
         if "geometric_prompt" not in state:
             state["geometric_prompt"] = self.model._get_dummy_prompt()
+            # _get_dummy_prompt() returns a Prompt object with:
+            #   - box_embeddings: torch.zeros(0, 1, 4)  # 0 boxes
+            #   - box_mask: torch.zeros(1, 0, dtype=bool)  # empty attention mask
+            #   - point_embeddings: None  # 0 points
+            #   - mask_embeddings: None  # 0 masks
+            # This indicates the user is using only text prompts, no geometric prompts
 
         return self._forward_grounding(state)
 

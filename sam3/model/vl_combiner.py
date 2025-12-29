@@ -87,6 +87,7 @@ class SAM3VLBackbone(nn.Module):
             samples
         )
         if self.scalp > 0:
+            print(f"Discard the lowest resolution features: {sam3_features[-1].shape}")
             # Discard the lowest resolution features
             sam3_features, sam3_pos = (
                 sam3_features[: -self.scalp],
