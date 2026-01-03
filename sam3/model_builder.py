@@ -596,9 +596,12 @@ def build_sam3_image_model(
     text_encoder = _create_text_encoder(bpe_path)
 
     # Create visual-language backbone
+    # Extract the visual and text features
     backbone = _create_vl_backbone(vision_encoder, text_encoder)
 
     # Create transformer components
+    # Encoder layer augmentate text and visual features by self-attention
+    # Decoder layer merge text and visual features by cross-attention, output predicted masks, boxes, scores
     transformer = _create_sam3_transformer()
 
     # Create dot product scoring

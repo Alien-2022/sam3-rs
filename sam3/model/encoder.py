@@ -58,10 +58,9 @@ class TransformerEncoderLayer(nn.Module):
         self.cross_attn_image = cross_attention
 
         # Implementation of Feedforward model
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.linear1 = nn.Linear(d_model, dim_feedforward) # 256->1024
         self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
-
+        self.linear2 = nn.Linear(dim_feedforward, d_model) # 1024->256
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
         self.norm3 = nn.LayerNorm(d_model)

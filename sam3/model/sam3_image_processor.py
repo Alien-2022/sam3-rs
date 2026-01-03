@@ -91,6 +91,25 @@ class Sam3Processor:
                     sam2_backbone_out["backbone_fpn"][1]
                 )
             )
+        # the shape of state:
+        # state = {
+        #     "original_heights": height,
+        #     "original_widths": width,
+        #     "backbone_out": {
+        #         "vision_features": [1, 256, 72, 72],
+        #         "vision_pos_enc": [
+        #             [1, 256, 288, 288],
+        #             [1, 256, 144, 144],
+        #             [1, 256, 72, 72],
+        #         ],
+        #         "backbone_fpn": [
+        #             [1, 256, 288, 288],
+        #             [1, 256, 144, 144],
+        #             [1, 256, 72, 72],
+        #         ],
+        #         "sam2_backbone_out": None,
+        #     },
+        # }
         return state
 
     @torch.inference_mode()
@@ -148,10 +167,7 @@ class Sam3Processor:
 
         # will erase the previous text prompt if any
         state["backbone_out"].update(text_outputs)
-        for key in state["backbone_out"]:
-            # if state["backbone_out"][key] is not None:
-            print(key)
-        # the shape of state:
+        # the shape of state after update:
         # state = {
         #     "original_heights": height,
         #     "original_widths": width,
@@ -186,6 +202,11 @@ class Sam3Processor:
             #   - mask_embeddings: None  # 0 masks
             # This indicates the user is using only text prompts, no geometric prompts
 
+        # add new keys(predict masks, boxes, scores) to state and return, new keys:
+        #   - "masks_logits": [inst_num, 1, original_height, original_width]
+        #   - "masks": [inst_num, 1, original_height, original_width]
+        #   - "boxes": [inst_num, 4]
+        #   - "scores": [inst_num]
         return self._forward_grounding(state)
 
     @torch.inference_mode()
@@ -245,6 +266,18 @@ class Sam3Processor:
 
     @torch.inference_mode()
     def _forward_grounding(self, state: Dict):
+
+        # Perform grounding forward pass to generate predictions
+        # Inputs:
+        #   - backbone_out: Combined vision and text features
+        #   - find_input: Current processing stage
+        #   - geometric_prompt: User-provided geometric prompts (boxes/points/masks)
+        #   - find_target: Used for supervised training, not used in inference
+        # Outputs will contain:
+        #   - pred_boxes: Predicted bounding boxes in cxcywh format
+        #   - pred_logits: Classification logits
+        #   - pred_masks: Predicted segmentation masks
+        #   - presence_logit_dec: Presence confidence score
         outputs = self.model.forward_grounding(
             backbone_out=state["backbone_out"],
             find_input=self.find_stage,
@@ -279,6 +312,7 @@ class Sam3Processor:
             align_corners=False,
         ).sigmoid()
 
+        # masks_logits is the  prediction(0~1) for each pixel, masks is the binary masks with threshold 0.5
         state["masks_logits"] = out_masks
         state["masks"] = out_masks > 0.5
         state["boxes"] = boxes

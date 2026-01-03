@@ -123,7 +123,7 @@ class Sam3Image(torch.nn.Module):
                 # We currently don't expect this to happen. We could technically trigger a recompute here,
                 # but likely at the cost of a cpu<->gpu sync point, which would deteriorate perf
                 torch._assert_async((img_ids >= 0).all())
-
+            # Retrieve visual features and position encodings
             vis_feats = backbone_out["backbone_fpn"][-self.num_feature_levels :]
             vis_pos_enc = backbone_out["vision_pos_enc"][-self.num_feature_levels :]
             vis_feat_sizes = [x.shape[-2:] for x in vis_pos_enc]  # (H, W) shapes
@@ -181,7 +181,19 @@ class Sam3Image(torch.nn.Module):
         txt_ids = find_input.text_ids
         txt_feats = backbone_out["language_features"][:, txt_ids]
         txt_masks = backbone_out["language_mask"][txt_ids]
-
+        # "backbone_out": {
+        #     "vision_features": [1, 256, 72, 72],
+        #     "vision_pos_enc": [
+        #         [1, 256, 288, 288],
+        #         [1, 256, 144, 144],
+        #         [1, 256, 72, 72],
+        #     ],
+        #     "backbone_fpn": [
+        #         [1, 256, 288, 288],
+        #         [1, 256, 144, 144],
+        #         [1, 256, 72, 72],
+        #     ]
+        # }
         feat_tuple = self._get_img_feats(backbone_out, find_input.img_ids)
         backbone_out, img_feats, img_pos_embeds, vis_feat_sizes = feat_tuple
 
@@ -219,8 +231,65 @@ class Sam3Image(torch.nn.Module):
         prompt_mask,
         encoder_extra_kwargs: Optional[Dict] = None,
     ):
+        """
+        Run the transformer encoder to fuse image, text, and geometric prompts.
+
+        SAM3 Transformer Encoder Design:
+        - Architecture: 6-layer transformer encoder with multi-head attention (8 heads)
+        - Feature dimension: 256 (d_model)
+        - Feedforward dimension: 2048 (8x d_model)
+        - Activation: ReLU
+        - Dropout: 0.1
+        - Uses pre-normalization (pre_norm=True)
+
+        Each encoder layer contains:
+        1. Self-attention for image features (MultiheadAttention, 8 heads)
+           - Position encoding applied to attention (pos_enc_at_attn=True)
+        2. Cross-attention between image and text/geometric prompts (MultiheadAttention, 8 heads)
+           - Fuses visual and text/geometric modalities
+        3. Feedforward network (2048 hidden dim)
+        4. Layer normalization and residual connections
+
+        Inputs:
+            backbone_out: Dictionary containing backbone features
+            find_input: Input specification including image ids
+            prompt: Unified prompt tensor [num_prompts, batch_size, d_model=256]
+                   - Contains text tokens (32), geometric tokens (1), and visual tokens (0)
+                   - Total: [33, 1, 256] for single prompt with dummy geometric
+            prompt_mask: Attention mask for prompts [batch_size, num_prompts]
+                        - [1, 33] for single prompt
+            encoder_extra_kwargs: Optional extra arguments for encoder
+
+        Internal flow:
+            1. Retrieve multi-scale image features from backbone_out via _get_img_feats
+               - img_feats: List of image features at different scales [HWxNxC]
+               - img_pos_embeds: List of positional encodings for each scale
+               - vis_feat_sizes: List of (H, W) for each scale
+            2. Pass features through 6-layer transformer encoder
+               - Self-attention across spatial image features
+               - Cross-attention from image to text/geometric prompts
+               - Outputs fused multi-modal representations
+
+        Returns (encoder_out dictionary):
+            encoder_hidden_states: [seq_len, batch_size, d_model=256]
+                                 - Encoded image features after fusion with prompts
+                                 - Shape depends on spatial resolution of feature maps
+            pos_embed: Position embedding for encoder_hidden_states
+            padding_mask: Padding mask for valid/invalid positions in encoded features
+            level_start_index: Starting indices for each feature level in flattened sequence
+            spatial_shapes: [num_levels, 2] - (H, W) for each feature level
+            valid_ratios: Valid ratios for each feature level
+            vis_feat_sizes: Original feature sizes [(H, W), ...] for each level
+            prompt_before_enc: Input prompt tensor [num_prompts, batch_size, d_model]
+                             - For reference: prompts before encoding
+            prompt_after_enc: Encoded prompt tokens [num_prompts, batch_size, d_model]
+                            - Prompts after cross-attention with image features
+                            - May be same as before if no text cross-attention
+            prompt_mask: Original prompt attention mask [batch_size, num_prompts]
+        """
         feat_tuple = self._get_img_feats(backbone_out, find_input.img_ids)
         backbone_out, img_feats, img_pos_embeds, vis_feat_sizes = feat_tuple
+        # img_feats.shape [5184, 1, 256]
 
         # Run the encoder
         prompt_pos_embed = torch.zeros_like(prompt)
@@ -261,9 +330,13 @@ class Sam3Image(torch.nn.Module):
         prompt_mask,
         encoder_out,
     ):
+        # batch_size
         bs = memory.shape[1]
-        query_embed = self.transformer.decoder.query_embed.weight
-        tgt = query_embed.unsqueeze(1).repeat(1, bs, 1)
+        # learnable query embedding, shape (num_queries, d_model) = (200, 256)
+        query_embed = self.transformer.decoder.query_embed.weight 
+        # repeat query_embed for bs times, shape (200, bs, 256), so share the same query_embed for all images in a batch
+        # (200, 256)->(200, 1, 256)->(200, bs, 256)
+        tgt = query_embed.unsqueeze(1).repeat(1, bs, 1) 
 
         apply_dac = self.transformer.decoder.dac and self.training
         hs, reference_boxes, dec_presence_out, dec_presence_feats = (
@@ -446,17 +519,60 @@ class Sam3Image(torch.nn.Module):
         find_target,
         geometric_prompt: Prompt,
     ):
+        # Text+geometry (box/point/mask) and optional visual prompt are compiled into a unified prompt tensor.
+        # input:
+        #   backbone_out: includes multi-scale feature maps, language features, and language mask
+        #     "backbone_out": {
+        #         "vision_features": [1, 256, 72, 72],
+        #         "vision_pos_enc": [
+        #             [1, 256, 288, 288],
+        #             [1, 256, 144, 144],
+        #             [1, 256, 72, 72],
+        #         ],
+        #         "backbone_fpn": [
+        #             [1, 256, 288, 288],
+        #             [1, 256, 144, 144],
+        #             [1, 256, 72, 72],
+        #         ]
+        #     }
+        #   find_input: includes image ids, image size, image mask, image boxes, image points, image masks
+        #   geometric_prompt: visual prompts like box/point/mask, default value is a dummy prompt
+        # output:
+        #   prompt: unified prompt tensor from concatenating txt_feats, geo_feats, and visual_prompt_embed
+        #     - txt_feats: [32, 1, 256] - text tokens from language encoder
+        #     - geo_feats: [1, 1, 256] - geometric prompt tokens (dummy prompt outputs one learnable token)
+        #     - visual_prompt_embed: [0, 1, 256] - visual prompt tokens (empty by default)
+        #   prompt_mask: [1, 33] - attention mask for the prompt tensor
+        #   backbone_out:
         with torch.profiler.record_function("SAM3Image._encode_prompt"):
             prompt, prompt_mask, backbone_out = self._encode_prompt(
                 backbone_out, find_input, geometric_prompt
             )
+
         # Run the encoder
+        # Fuses the image features with the prompt(text) features.
+        # SAM3 Transformer Encoder Design:
+        # - Architecture: 6-layer transformer encoder with multi-head attention (8 heads)
+        # - Feature dimension: 256 (d_model)
+        # - Feedforward dimension: 2048 (8x d_model)
+        # - Activation: ReLU
+        # - Dropout: 0.1
+        # - Uses pre-normalization (pre_norm=True)
+        # Each encoder layer contains:
+        # 1. Self-attention for image features (256->256)
+        # 2. Cross-attention between image and text/geometric prompts (256->256)
+        # 3. Feedforward network (256->2048->256)
+        # 4. Layer normalization and residual connections
         with torch.profiler.record_function("SAM3Image._run_encoder"):
             backbone_out, encoder_out, _ = self._run_encoder(
                 backbone_out, find_input, prompt, prompt_mask
             )
         out = {
+            # Although the _run_encoder accepts the 3-layer feature output in backbone_out["backbone_fpn"],
+            # the internal function _get_img_feats only takes the last layer feature, which is [1, 256, 72, 72].
+            # so the encoder_out["encoder_hidden_states"] after feature fusion is [5184, 1, 256], 72*72=5184
             "encoder_hidden_states": encoder_out["encoder_hidden_states"],
+            # Cache all intermediate outputs of the current step for subsequent interactive steps.
             "prev_encoder_out": {
                 "encoder_out": encoder_out,
                 "backbone_out": backbone_out,
@@ -464,6 +580,46 @@ class Sam3Image(torch.nn.Module):
         }
 
         # Run the decoder
+        # Purpose: Generate object predictions (masks, boxes, scores) by decoding the encoded features
+        # using learnable queries and cross-attention with the encoded image features.
+        #
+        # Input:
+        #   - memory: torch.Tensor [seq_len, batch_size, d_model=256]
+        #       Encoded image features from the encoder after fusion with prompts
+        #   - pos_embed: torch.Tensor [seq_len, batch_size, d_model=256]
+        #       Positional embeddings for the encoder hidden states
+        #   - src_mask: torch.Tensor [batch_size, seq_len] or None
+        #       Padding mask indicating valid positions in memory (True = padding, False = valid)
+        #   - out: dict
+        #       Dictionary to accumulate prediction outputs
+        #   - prompt: torch.Tensor [num_prompts, batch_size, d_model=256]
+        #       Unified prompt tensor containing text and geometric tokens
+        #   - prompt_mask: torch.Tensor [batch_size, num_prompts]
+        #       Attention mask for the prompt (True = padding, False = valid)
+        #   - encoder_out: dict
+        #       Complete encoder output dictionary containing:
+        #       - level_start_index: Starting indices for each feature level
+        #       - spatial_shapes: [num_levels, 2] - Spatial shapes (H, W) of each feature level
+        #       - valid_ratios: Valid ratios for padded regions
+        #       - And other encoder metadata
+        #
+        # Output:
+        #   - out: dict
+        #       Updated dictionary with decoder predictions:
+        #       - pred_logits: [batch_size, num_queries, 1] - Objectness scores
+        #       - pred_boxes: [batch_size, num_queries, 4] - Bounding boxes in (cx, cy, w, h) format
+        #       - pred_boxes_xyxy: [batch_size, num_queries, 4] - Bounding boxes in (x1, y1, x2, y2) format
+        #       - pred_masks: [batch_size, num_queries, H, W] - Segmentation masks (if segmentation_head is set)
+        #       - presence_feats: [batch_size, num_queries, d_model] - Presence token features
+        #   - hs: torch.Tensor [num_layers, batch_size, num_queries, d_model=256]
+        #       Decoder hidden states from all layers (used for auxiliary losses)
+        #       Transposed from seq-first to batch-first format
+        #
+        # Decoder Details:
+        #   - Uses 200 learnable query embeddings as initial targets
+        #   - Applies cross-attention between queries and encoder memory
+        #   - Generates hierarchical predictions through multi-layer decoding
+        #   - Supports DAC (Deformable Attention Collector) if enabled during training
         with torch.profiler.record_function("SAM3Image._run_decoder"):
             out, hs = self._run_decoder(
                 memory=out["encoder_hidden_states"],
@@ -528,6 +684,37 @@ class Sam3Image(torch.nn.Module):
         return geometric_prompt
 
     def forward(self, input: BatchedDatapoint):
+        """
+        Forward pass for SAM3 image model, used for both training and inference.
+
+        This method implements the complete iterative visual grounding pipeline, which includes:
+        1. Image feature extraction (backbone)
+        2. Text prompt encoding
+        3. Iterative geometric prompt sampling and object grounding (interactive steps)
+
+        Difference from forward_grounding:
+        - forward: Complete forward pass with multiple interactive iterations, used for training and full inference
+        - forward_grounding: Single-step grounding, assumes features are already extracted, performs only one grounding step, used for fast inference
+
+        Args:
+            input (BatchedDatapoint): Batched input data points, containing:
+                - img_batch: Image batch [B, C, H, W]
+                - find_text_batch: Text prompt batch
+                - find_inputs: Geometric prompts (bounding boxes, points, etc.)
+                - find_targets: Target annotations (used during training)
+
+        Returns:
+            SAM3Output: Multi-stage output results, containing:
+                - Segmentation masks from each step
+                - Bounding box predictions
+                - Other auxiliary outputs (e.g., auxiliary decoder outputs)
+
+        Notes:
+            - During training: num_interactive_steps = 0 (only performs one grounding step)
+            - During inference: Performs self.num_interactive_steps_val interactive iterations
+            - Only supports single-frame processing (assert num_frames == 1)
+            - Point prompts are ignored in PCS mode
+        """
         device = self.device
         backbone_out = {"img_batch_all_stages": input.img_batch}
         backbone_out.update(self.backbone.forward_image(input.img_batch))
@@ -557,6 +744,8 @@ class Sam3Image(torch.nn.Module):
         # Init vars that are shared across the loop.
         stage_outs = []
         for cur_step in range(num_interactive_steps + 1):
+            # Step 0: Use initial geometric prompts (user-provided bounding boxes, etc.)
+            # Step 1 and beyond: Sample new geometric prompts based on previous step's predictions for iterative refinement
             if cur_step > 0:
                 # We sample interactive geometric prompts (boxes, points)
                 geometric_prompt, _ = self.interactive_prompt_sampler.sample(
@@ -564,6 +753,7 @@ class Sam3Image(torch.nn.Module):
                     find_target=find_target,
                     previous_out=stage_outs[-1],
                 )
+            # Perform single-step grounding: fuse image, text, and geometric prompts to generate segmentation masks and bounding boxes
             out = self.forward_grounding(
                 backbone_out=backbone_out,
                 find_input=find_input,
@@ -572,6 +762,7 @@ class Sam3Image(torch.nn.Module):
             )
             stage_outs.append(out)
 
+        # Pack outputs from all steps into a SAM3Output object and return
         previous_stages_out.append(stage_outs)
         return previous_stages_out
 
