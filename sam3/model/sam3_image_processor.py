@@ -287,15 +287,20 @@ class Sam3Processor:
 
         out_bbox = outputs["pred_boxes"]
         out_logits = outputs["pred_logits"]
+        # out_masks: Each queries outputs the pixel probability of its detected target.
         out_masks = outputs["pred_masks"]
+        # out_probs: Existence probability of each instance detected by 200 queries
         out_probs = out_logits.sigmoid()
         presence_score = outputs["presence_logit_dec"].sigmoid().unsqueeze(1)
-        out_probs = (out_probs * presence_score).squeeze(-1)
+        # update out_probs with presence_score
+        out_probs = (out_probs * presence_score).squeeze(-1) # [B, 200, 1] -> [B, 200]
 
-        keep = out_probs > self.confidence_threshold
-        out_probs = out_probs[keep]
-        out_masks = out_masks[keep]
-        out_bbox = out_bbox[keep]
+        keep = out_probs > self.confidence_threshold # [B, 200]
+
+        # Filter probabilities, masks and boxes of 200 queries based on confidence threshold
+        out_probs = out_probs[keep] # [B, 200] -> [B, n]  
+        out_masks = out_masks[keep] # [B, 200, 288, 288] -> [n, 288, 288]
+        out_bbox = out_bbox[keep] # [1, n, 4]
 
         # convert to [x0, y0, x1, y1] format
         boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
@@ -305,6 +310,7 @@ class Sam3Processor:
         scale_fct = torch.tensor([img_w, img_h, img_w, img_h]).to(self.device)
         boxes = boxes * scale_fct[None, :]
 
+        # [n, 288, 288] -> [n, 1, img_h, img_w]
         out_masks = interpolate(
             out_masks.unsqueeze(1),
             (img_h, img_w),

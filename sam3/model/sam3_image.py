@@ -333,14 +333,16 @@ class Sam3Image(torch.nn.Module):
         # batch_size
         bs = memory.shape[1]
         # learnable query embedding, shape (num_queries, d_model) = (200, 256)
-        query_embed = self.transformer.decoder.query_embed.weight 
+        query_embed = self.transformer.decoder.query_embed.weight
         # repeat query_embed for bs times, shape (200, bs, 256), so share the same query_embed for all images in a batch
         # (200, 256)->(200, 1, 256)->(200, bs, 256)
-        tgt = query_embed.unsqueeze(1).repeat(1, bs, 1) 
+        tgt = query_embed.unsqueeze(1).repeat(1, bs, 1)
 
         apply_dac = self.transformer.decoder.dac and self.training
+        # hs means hidden states, shape (6, 200, bs, 256)
         hs, reference_boxes, dec_presence_out, dec_presence_feats = (
             self.transformer.decoder(
+                # call the decoder.forward function
                 tgt=tgt,
                 memory=memory,
                 memory_key_padding_mask=src_mask,
@@ -360,7 +362,6 @@ class Sam3Image(torch.nn.Module):
         if dec_presence_out is not None:
             # seq-first to batch-first
             dec_presence_out = dec_presence_out.transpose(1, 2)
-
         out["presence_feats"] = dec_presence_feats
         self._update_scores_and_boxes(
             out,
@@ -418,7 +419,7 @@ class Sam3Image(torch.nn.Module):
 
         if self.supervise_joint_box_scores:
             assert dec_presence_out is not None
-            prob_dec_presence_out = dec_presence_out.clone().sigmoid()
+            prob_dec_presence_out = [dec_presence_out].clone().sigmoid()
             if self.detach_presence_in_joint_score:
                 prob_dec_presence_out = prob_dec_presence_out.detach()
 
@@ -469,23 +470,43 @@ class Sam3Image(torch.nn.Module):
         prompt_mask,
         hs,
     ):
+        # DAC is a mechanism to enhance segmentation quality during training.
+        # Additional o2m queries (using BinaryOneToManyMatcher) are used for mask supervision
+        # When Training, DAC=True, hs.size(2)=400, num_o2o=200, num_o2m=200
+        # When Inference, DAC=False, hs.size(2)=200, num_o2o=200, num_o2m=0
+
         apply_dac = self.transformer.decoder.dac and self.training
         if self.segmentation_head is not None:
             num_o2o = (hs.size(2) // 2) if apply_dac else hs.size(2)
             num_o2m = hs.size(2) - num_o2o
+            # o2m_mask_predict only True in train(dac mode)
             obj_queries = hs if self.o2m_mask_predict else hs[:, :, :num_o2o]
+            # Run segmentation head with selected queries
+            # seg_head_outputs = {
+            #     "pred_masks": torch.Size([1, 200, 288, 288]),
+            #     "semantic_seg": torch.Size([1, 1, 288, 288]),
+            #     "presence_logit": None,
+            # }
             seg_head_outputs = activation_ckpt_wrapper(self.segmentation_head)(
                 backbone_feats=backbone_out["backbone_fpn"],
                 obj_queries=obj_queries,
                 image_ids=img_ids,
                 encoder_hidden_states=encoder_hidden_states,
-                act_ckpt_enable=self.training and self.use_act_checkpoint_seg_head,
+                act_ckpt_enable=self.training
+                and self.use_act_checkpoint_seg_head,  # True in train mode
                 prompt=prompt,
                 prompt_mask=prompt_mask,
             )
             aux_masks = False  # self.aux_loss and self.segmentation_head.aux_masks
+            # update out with seg_head_outputs
             for k, v in seg_head_outputs.items():
+                # instance_keys = ['pred_masks'] see maskformer_segmentation.py:SegmentationHead:__init__
                 if k in self.segmentation_head.instance_keys:
+                    # only enter if k == 'pred_masks'
+                    # because pred_masks maybe different in train and inference mode
+                    # so we need different strategy to update 'pred_masks' in out
+                    # when training there will be 200 o2o pred_masks and 200 o2m pred_masks
+                    # when inference there will be 200 o2o pred_masks and 0 o2m pred_masks
                     _update_out(out, k, v[:, :num_o2o], auxiliary=aux_masks)
                     if (
                         self.o2m_mask_predict and num_o2m > 0
@@ -495,6 +516,8 @@ class Sam3Image(torch.nn.Module):
                         )
                 else:
                     out[k] = v
+            # add 3 new keys to out:
+            #   "pred_masks", "semantic_seg", "presence_logit"
         else:
             backbone_out.pop("backbone_fpn", None)
 
@@ -607,10 +630,12 @@ class Sam3Image(torch.nn.Module):
         #   - out: dict
         #       Updated dictionary with decoder predictions:
         #       - pred_logits: [batch_size, num_queries, 1] - Objectness scores
-        #       - pred_boxes: [batch_size, num_queries, 4] - Bounding boxes in (cx, cy, w, h) format
-        #       - pred_boxes_xyxy: [batch_size, num_queries, 4] - Bounding boxes in (x1, y1, x2, y2) format
-        #       - pred_masks: [batch_size, num_queries, H, W] - Segmentation masks (if segmentation_head is set)
-        #       - presence_feats: [batch_size, num_queries, d_model] - Presence token features
+        #       - pred_boxes: [batch_size, num_queries, 4] - Bounding boxes in (cx, cy, w, h) format, training friendly
+        #       - pred_boxes_xyxy: [batch_size, num_queries, 4] - Bounding boxes in (x1, y1, x2, y2) format, visualization friendly
+        #       - presence_feats: [batch_size, 1, d_model] - Global presence token features (single token, not per-query)
+        #       - presence_logit_dec: [batch_size, num_layers, 1] - Presence logits from each decoder layer (if applicable)
+        #       - queries: [batch_size, num_queries, d_model] - Final query features from the last decoder layer
+        #       Note: pred_masks are NOT included here; they are added later in _run_segmentation_heads
         #   - hs: torch.Tensor [num_layers, batch_size, num_queries, d_model=256]
         #       Decoder hidden states from all layers (used for auxiliary losses)
         #       Transposed from seq-first to batch-first format

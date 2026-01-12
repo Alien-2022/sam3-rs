@@ -33,6 +33,7 @@ class MaskPredictor(nn.Module):
                     "bqc,chw->bqhw", self.mask_embed(obj_queries), pixel_embed
                 )
             else:
+                # pixel_embed.shape like [bs, c, h, w] in most cases
                 mask_preds = torch.einsum(
                     "bqc,bchw->bqhw", self.mask_embed(obj_queries), pixel_embed
                 )
@@ -47,7 +48,6 @@ class MaskPredictor(nn.Module):
                 mask_preds = torch.einsum(
                     "lbqc,bchw->lbqhw", self.mask_embed(obj_queries), pixel_embed
                 )
-
         return mask_preds
 
 
@@ -162,6 +162,7 @@ class SegmentationHead(nn.Module):
         if self.no_dec:
             mask_pred = self.mask_predictor(pixel_embed)
         elif self.aux_masks:
+            # aux_masks is False in prediction
             mask_pred = self.mask_predictor(obj_queries, pixel_embed)
         else:
             mask_pred = self.mask_predictor(obj_queries[-1], pixel_embed)
@@ -202,10 +203,12 @@ class PixelDecoder(nn.Module):
 
     def forward(self, backbone_feats: List[torch.Tensor]):
         # Assumes backbone features are already projected (C == hidden dim)
-
+        # backbone_feats: [1, 256, 72, 72]
         prev_fpn = backbone_feats[-1]
+        # fpn_feats: [[1, 256, 288, 288],[1, 256, 144, 144]]
         fpn_feats = backbone_feats[:-1]
         for layer_idx, bb_feat in enumerate(fpn_feats[::-1]):
+            # fpn_feats[::-1] means reverse the list
             curr_fpn = bb_feat
             prev_fpn = curr_fpn + F.interpolate(
                 prev_fpn, size=curr_fpn.shape[-2:], mode=self.interpolation_mode
