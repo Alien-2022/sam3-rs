@@ -293,14 +293,14 @@ class Sam3Processor:
         out_probs = out_logits.sigmoid()
         presence_score = outputs["presence_logit_dec"].sigmoid().unsqueeze(1)
         # update out_probs with presence_score
-        out_probs = (out_probs * presence_score).squeeze(-1) # [B, 200, 1] -> [B, 200]
+        out_probs = (out_probs * presence_score).squeeze(-1)  # [B, 200, 1] -> [B, 200]
 
-        keep = out_probs > self.confidence_threshold # [B, 200]
+        keep = out_probs > self.confidence_threshold  # [B, 200]
 
         # Filter probabilities, masks and boxes of 200 queries based on confidence threshold
-        out_probs = out_probs[keep] # [B, 200] -> [B, n]  
-        out_masks = out_masks[keep] # [B, 200, 288, 288] -> [n, 288, 288]
-        out_bbox = out_bbox[keep] # [1, n, 4]
+        out_probs = out_probs[keep]  # [B, 200] -> [B, n]
+        out_masks = out_masks[keep]  # [B, 200, 288, 288] -> [n, 288, 288]
+        out_bbox = out_bbox[keep]  # [1, n, 4]
 
         # convert to [x0, y0, x1, y1] format
         boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
@@ -318,9 +318,20 @@ class Sam3Processor:
             align_corners=False,
         ).sigmoid()
 
+        # [1, 1, 288, 288] -> [1, 1, img_h, img_w]
+        semantic_seg_mask = outputs["semantic_seg"]
+        semantic_seg_mask = interpolate(
+            semantic_seg_mask,
+            (img_h, img_w),
+            mode="bilinear",
+            align_corners=False,
+        ).sigmoid()
+
         # masks_logits is the  prediction(0~1) for each pixel, masks is the binary masks with threshold 0.5
         state["masks_logits"] = out_masks
         state["masks"] = out_masks > 0.5
         state["boxes"] = boxes
         state["scores"] = out_probs
+
+        state["semantic_seg"] = semantic_seg_mask
         return state

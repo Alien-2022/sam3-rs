@@ -516,8 +516,8 @@ class Sam3Image(torch.nn.Module):
                         )
                 else:
                     out[k] = v
-            # add 3 new keys to out:
-            #   "pred_masks", "semantic_seg", "presence_logit"
+                    # add 3 new keys to out:
+                    # "pred_masks", "semantic_seg", "presence_logit"
         else:
             backbone_out.pop("backbone_fpn", None)
 
