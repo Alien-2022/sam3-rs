@@ -1,0 +1,18 @@
+# SAM3-RS Requirements
+# Lightweight dependencies only - no MMSegmentation or MMCV!
+
+# Core dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+Pillow>=9.5.0
+matplotlib>=3.7.0
+
+# Optional but recommended
+tqdm>=4.65.0  # Progress bars
+
+# For JSON/YAML config (optional but useful)
+pyyaml>=6.0
+
+# Note: SAM3 is assumed to be installed as a local package
+# from workspace/core/sam3-rs/sam3/
