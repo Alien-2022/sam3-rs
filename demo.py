@@ -15,7 +15,8 @@ import os
 
 # Import from new SAM3-RS structure
 from segmentor import SAM3RSSegmentor, InferenceConfig
-from utils import visualize_prediction, save_mask
+
+# from utils import visualize_prediction, save_mask
 
 from workspace.configs.path_conf import ROOT_DIR, TEST_DIR
 from workspace.scripts.get_weights import get_weight_path
@@ -205,7 +206,7 @@ def single_img_single_prompt(
 
     # Load image
     image = Image.open(image_path).convert("RGB")
-    image_name = os.path.basename(image_path)[0]
+    image_name = os.path.basename(image_path).split(".")[0]
 
     # Get instance segmentation from SAM3
     inference_state = segmentor.processor.set_image(image)
@@ -264,16 +265,21 @@ def main():
 
     # ============ Configuration ============
 
+    # Get the directory where this script is located
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+
     # Model paths
     checkpoint_path = get_weight_path("sam3") + "/sam3.pt"
-    bpe_path = "sam3/assets/bpe_simple_vocab_16e6.txt.gz"
+    bpe_path = os.path.join(
+        current_dir, "sam3", "assets", "bpe_simple_vocab_16e6.txt.gz"
+    )
 
     # Test image path (modify as needed)
     dataset_path = get_data_path("LoveDA")
     test_image_path = os.path.join(dataset_path, "Val/Urban/images_png/3549.png")
 
     # Prompts file for multi-class segmentation
-    prompts_file = "configs/prompts_example.txt"
+    prompts_file = os.path.join(current_dir, "configs/prompts_example.txt")
 
     # Output directory
     output_dir = os.path.join(TEST_DIR, "sam3")
@@ -290,13 +296,13 @@ def main():
         checkpoint_path=checkpoint_path,
         bpe_path=bpe_path,
         device="cuda",
-        confidence_threshold=0.1,
+        confidence_threshold=0.5,
         prob_threshold=0.0,
         use_semantic_head=True,
-        use_instance_head=True,
+        use_instance_head=False,
         use_presence_score=True,
         slide_crop_size=0,  # No sliding window for small images
-        slide_stride=512,
+        slide_stride=1024,
         prompts_file=prompts_file,  # Load multi-class prompts
     )
 
@@ -306,22 +312,20 @@ def main():
     # ============ Run Demo ============
 
     # Demo 1: Single prompt (instance segmentation)
-    print("\n" + "=" * 60)
-    print("Demo 1: Single Prompt Inference")
-    print("=" * 60)
-
-    output_path_single = os.path.join(output_dir, "single_prompt")
-    os.makedirs(output_path_single, exist_ok=True)
-
-    # Note: For single prompt, we use SAM3's raw output
-    # This is for demonstration of instance segmentation
-    single_img_single_prompt(
-        segmentor,
-        test_image_path,
-        prompt="building",
-        output_path=output_path_single,
-        mode="mask",
-    )
+    # Note: This bypasses segmentor.predict_single() and uses SAM3 raw output directly
+    # It does NOT respect use_instance_head/use_semantic_head config
+    # print("\n" + "=" * 60)
+    # print("Demo 1: Single Prompt Inference (bypasses segmentor)")
+    # print("=" * 60)
+    # output_path_single = os.path.join(output_dir, "single_prompt")
+    # os.makedirs(output_path_single, exist_ok=True)
+    # single_img_single_prompt(
+    #     segmentor,
+    #     test_image_path,
+    #     prompt="tree",
+    #     output_path=output_path_single,
+    #     mode="mask",
+    # )
 
     # Demo 2: Multi-class prompts (semantic segmentation)
     print("\n" + "=" * 60)

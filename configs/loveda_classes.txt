@@ -1,0 +1,8 @@
+background
+bareland,barren
+road
+car,vehicle
+tree,forest
+water,river
+cropland,farmland
+building,roof,house
