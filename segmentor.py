@@ -20,6 +20,7 @@ from dataclasses import dataclass
 @dataclass
 class InferenceConfig:
     """Configuration for SAM3-RS inference"""
+
     # Model paths
     checkpoint_path: str
     bpe_path: str
@@ -46,14 +47,18 @@ class InferenceConfig:
 @dataclass
 class SegmentationResult:
     """Result structure for each image"""
+
     image_path: str
     seg_logits: torch.Tensor  # [num_classes, H, W]
-    seg_pred: torch.Tensor   # [H, W] with class IDs
-    per_class_results: Dict[str, Dict]  # {prompt_name: {masks, boxes, scores, ...}}
+    seg_pred: torch.Tensor  # [H, W] with class IDs
+    # {prompt_name: {masks, boxes, scores, ...}}
+    per_class_results: Dict[str, Dict]
 
     # Individual head predictions (for comparison/analysis)
-    semantic_pred: Optional[torch.Tensor] = None  # [H, W] from semantic head only
-    instance_pred: Optional[torch.Tensor] = None   # [H, W] from instance head only
+    # [H, W] from semantic head only
+    semantic_pred: Optional[torch.Tensor] = None
+    # [H, W] from instance head only
+    instance_pred: Optional[torch.Tensor] = None
 
 
 class SAM3RSSegmentor:
@@ -83,28 +88,25 @@ class SAM3RSSegmentor:
         model = build_sam3_image_model(
             bpe_path=config.bpe_path,
             checkpoint_path=config.checkpoint_path,
-            device=config.device
+            device=config.device,
         )
         self.processor = Sam3Processor(
-            model,
-            confidence_threshold=config.confidence_threshold,
-            device=self.device
+            model, confidence_threshold=config.confidence_threshold, device=self.device
         )
 
         # Load prompts if provided
         self.prompts = self._load_prompts(config.prompts_file)
-        self.num_classes = max(self.prompts['indices']) + 1 if self.prompts else 0
-        self.num_prompts = len(self.prompts['names']) if self.prompts else 0
+        self.num_classes = max(self.prompts["indices"]) + 1 if self.prompts else 0
+        self.num_prompts = len(self.prompts["names"]) if self.prompts else 0
 
         # Convert class indices to tensor
         if self.prompts:
             self.query_indices = torch.tensor(
-                self.prompts['indices'], dtype=torch.int64, device=self.device
+                self.prompts["indices"], dtype=torch.int64, device=self.device
             )
-
-            print(f"✓ SAM3-RS initialized with {self.num_classes} classes, {self.num_prompts} prompts")
-        else:
-            print("✓ SAM3-RS initialized with no prompts_file")
+            print(
+                f"✓ SAM3-RS initialized with {self.num_classes} classes, {self.num_prompts} prompts"
+            )
 
     def _load_prompts(self, prompts_file: Optional[str]) -> Optional[Dict]:
         """Load class names and their indices from config file.
@@ -128,14 +130,14 @@ class SAM3RSSegmentor:
 
         names, indices, mapping = [], [], {}
 
-        with open(prompts_file, 'r') as f:
+        with open(prompts_file, "r") as f:
             for line_idx, line in enumerate(f):
                 line = line.strip()
                 if not line:
                     continue
 
                 # Split by comma for synonyms
-                synonyms = [s.strip() for s in line.split(',') if s.strip()]
+                synonyms = [s.strip() for s in line.split(",") if s.strip()]
                 class_id = line_idx
 
                 names.extend(synonyms)
@@ -145,13 +147,11 @@ class SAM3RSSegmentor:
                 for synonym in synonyms:
                     mapping[synonym] = class_id
 
-        return {
-            'names': names,
-            'indices': indices,
-            'mapping': mapping
-        }
+        return {"names": names, "indices": indices, "mapping": mapping}
 
-    def _inference_single_view(self, image: Image.Image, detailed: bool = False) -> Tuple[torch.Tensor, Dict, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    def _inference_single_view(
+        self, image: Image.Image, detailed: bool = False
+    ) -> Tuple[torch.Tensor, Dict, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Inference on a single image (or crop patch).
 
@@ -167,37 +167,42 @@ class SAM3RSSegmentor:
 
         # Initialize separate logits for individual heads
         if self.config.use_semantic_head:
-            semantic_logits_only = torch.zeros((self.num_prompts, h, w), device=self.device)
+            semantic_logits_only = torch.zeros(
+                (self.num_prompts, h, w), device=self.device
+            )
         else:
             semantic_logits_only = None
 
         if self.config.use_instance_head:
-            instance_logits_only = torch.zeros((self.num_prompts, h, w), device=self.device)
+            instance_logits_only = torch.zeros(
+                (self.num_prompts, h, w), device=self.device
+            )
         else:
             instance_logits_only = None
 
         inference_state = None
-        with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        with torch.no_grad(), torch.autocast(
+            device_type=self.device, dtype=torch.bfloat16
+        ):
             inference_state = self.processor.set_image(image)
 
             # Process each prompt
-            for prompt_idx, prompt_word in enumerate(self.prompts['names']):
+            for prompt_idx, prompt_word in enumerate(self.prompts["names"]):
                 # Reset prompts for clean inference
                 self.processor.reset_all_prompts(inference_state)
                 output = self.processor.set_text_prompt(
-                    state=inference_state,
-                    prompt=prompt_word
+                    state=inference_state, prompt=prompt_word
                 )
 
                 # Store per-class detailed results if requested (move to CPU to save GPU memory)
                 if detailed:
                     per_class_results[prompt_word] = {
-                        'masks': output['masks'].cpu(),
-                        'masks_logits': output['masks_logits'].cpu(),
-                        'boxes': output['boxes'].cpu(),
-                        'scores': output['scores'].cpu(),
-                        'semantic_logits': output['semantic_seg'].cpu(),
-                        'presence_score': output.get('presence_score', 1.0)
+                        "masks": output["masks"].cpu(),
+                        "masks_logits": output["masks_logits"].cpu(),
+                        "boxes": output["boxes"].cpu(),
+                        "scores": output["scores"].cpu(),
+                        "semantic_logits": output["semantic_seg"].cpu(),
+                        "presence_score": output.get("presence_score", 1.0),
                     }
 
                 # ===== SegEarthOV3's Dual-Head Fusion =====
@@ -206,46 +211,68 @@ class SAM3RSSegmentor:
                 # 1. Instance head (Transformer decoder)
                 if self.config.use_instance_head:
                     inst_current = torch.zeros((h, w), device=self.device)
-                    num_instances = output['masks_logits'].shape[0]
+                    num_instances = output["masks_logits"].shape[0]
                     if num_instances > 0:
                         for inst_id in range(num_instances):
-                            inst_logits = output['masks_logits'][inst_id]
+                            # masks_logits: [inst_num, 1, H_orig, W_orig]
+                            inst_logits = output["masks_logits"][
+                                inst_id
+                            ]  # [1, H_orig, W_orig]
                             # SAM3 uses 'scores' which already includes presence_score
-                            inst_score = output['scores'][inst_id]
+                            inst_score = output["scores"][inst_id]
 
-                            # Resize if needed
-                            if inst_logits.shape != (h, w):
-                                inst_logits = F.interpolate(
-                                    inst_logits.view(1, 1, *inst_logits.shape),
-                                    size=(h, w),
-                                    mode='bilinear',
-                                    align_corners=False
-                                ).squeeze()
+                            # inst_logits.shape: [1, 1024, 1024] -> interpolate to [H, W]
+                            # Add channel dim for interpolate: [1, 1, H_orig, W_orig]
+                            if inst_logits.dim() == 3:
+                                inst_logits = inst_logits.unsqueeze(
+                                    0
+                                )  # [1, 1, H_orig, W_orig]
+                            inst_logits = F.interpolate(
+                                inst_logits,
+                                size=(h, w),
+                                mode="bilinear",
+                                align_corners=False,
+                            ).squeeze()  # [H, W]
 
-                            # Accumulate with score weighting
-                            inst_current = torch.max(inst_current, inst_logits * inst_score)
+                            # Accumulate with max pooling over instances (without score weighting)
+                            # NOTE: Score weighting is applied via presence_score at the end
+                            # inst_current = torch.max(inst_current, inst_logits)
+                            inst_current = torch.max(
+                                inst_current, inst_logits * inst_score
+                            )
 
                     current_logits = torch.max(current_logits, inst_current)
                     instance_logits_only[prompt_idx] = inst_current
 
                 # 2. Semantic head
                 if self.config.use_semantic_head:
-                    semantic_logits = output['semantic_seg']
-                    if semantic_logits.shape != (h, w):
-                        semantic_logits = F.interpolate(
-                            semantic_logits.unsqueeze(0).unsqueeze(0),
-                            size=(h, w),
-                            mode='bilinear',
-                            align_corners=False
-                        ).squeeze()
+                    # semantic_logits: [1, 1, H_orig, W_orig] (4D tensor)
+                    semantic_logits = output["semantic_seg"]
+                    semantic_logits = F.interpolate(
+                        semantic_logits,  # Already 4D [1, 1, H_orig, W_orig]
+                        size=(h, w),
+                        mode="bilinear",
+                        align_corners=False,
+                    ).squeeze()  # [H, W]
 
+                    # Fusion: take max of instance and semantic predictions
                     current_logits = torch.max(current_logits, semantic_logits)
                     semantic_logits_only[prompt_idx] = semantic_logits
 
+                print(f"current prompt: {prompt_word}")
+                print(
+                    f"Instance logits range: [{inst_current.min():.3f}, {inst_current.max():.3f}]"
+                )
+                print(
+                    f"Semantic logits range: [{semantic_logits.min():.3f}, {semantic_logits.max():.3f}]"
+                )
+                print(f"Num instances: {num_instances}")
+
                 # 3. Presence score filtering
-                # NOTE: Only apply to semantic head, since instance head already uses scores (which include presence_score)
-                if self.config.use_presence_score and not self.config.use_instance_head:
-                    presence_score = output.get('presence_score', 1.0)
+                # NOTE: Following SegEarthOV3's approach: apply to fused result (both heads)
+                # Multiply presence_score after max fusion
+                if self.config.use_presence_score:
+                    presence_score = output.get("presence_score", 1.0)
                     current_logits = current_logits * presence_score
 
                 seg_logits[prompt_idx] = current_logits
@@ -258,7 +285,9 @@ class SAM3RSSegmentor:
 
         return seg_logits, per_class_results, semantic_logits_only, instance_logits_only
 
-    def _sliding_window_inference(self, image: Image.Image, detailed: bool = False) -> Tuple[torch.Tensor, Dict, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    def _sliding_window_inference(
+        self, image: Image.Image, detailed: bool = False
+    ) -> Tuple[torch.Tensor, Dict, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Sliding window inference for large images.
 
@@ -278,12 +307,16 @@ class SAM3RSSegmentor:
 
         # Initialize separate logits for individual heads
         if self.config.use_semantic_head:
-            semantic_logits_only = torch.zeros((self.num_prompts, h_img, w_img), device=self.device)
+            semantic_logits_only = torch.zeros(
+                (self.num_prompts, h_img, w_img), device=self.device
+            )
         else:
             semantic_logits_only = None
 
         if self.config.use_instance_head:
-            instance_logits_only = torch.zeros((self.num_prompts, h_img, w_img), device=self.device)
+            instance_logits_only = torch.zeros(
+                (self.num_prompts, h_img, w_img), device=self.device
+            )
         else:
             instance_logits_only = None
 
@@ -311,7 +344,9 @@ class SAM3RSSegmentor:
                 crop_img = image.crop((x1, y1, x2, y2))
 
                 # Inference on crop
-                crop_logits, crop_results, crop_semantic, crop_instance = self._inference_single_view(crop_img, detailed=detailed)
+                crop_logits, crop_results, crop_semantic, crop_instance = (
+                    self._inference_single_view(crop_img, detailed=detailed)
+                )
 
                 # Accumulate results
                 seg_logits[:, y1:y2, x1:x2] += crop_logits
@@ -336,9 +371,7 @@ class SAM3RSSegmentor:
         return seg_logits, per_class_results, semantic_logits_only, instance_logits_only
 
     def predict_single(
-        self,
-        image_path: str,
-        detailed: bool = False
+        self, image_path: str, detailed: bool = False
     ) -> SegmentationResult:
         """
         Predict segmentation for a single image.
@@ -351,55 +384,155 @@ class SAM3RSSegmentor:
             SegmentationResult with predictions, including separate semantic_pred and instance_pred
         """
         # Load image
-        image = Image.open(image_path).convert('RGB')
+        image = Image.open(image_path).convert("RGB")
         original_shape = (image.height, image.width)
 
         # Choose inference mode
-        if (self.config.slide_crop_size > 0 and
-            (self.config.slide_crop_size < image.width or
-             self.config.slide_crop_size < image.height)):
+        if self.config.slide_crop_size > 0 and (
+            self.config.slide_crop_size < image.width
+            or self.config.slide_crop_size < image.height
+        ):
             # Use sliding window for large images
-            seg_logits, per_class_results, semantic_logits_only, instance_logits_only = self._sliding_window_inference(image, detailed=detailed)
+            (
+                seg_logits,
+                per_class_results,
+                semantic_logits_only,
+                instance_logits_only,
+            ) = self._sliding_window_inference(image, detailed=detailed)
         else:
             # Single view inference
-            seg_logits, per_class_results, semantic_logits_only, instance_logits_only = self._inference_single_view(image, detailed=detailed)
+            (
+                seg_logits,
+                per_class_results,
+                semantic_logits_only,
+                instance_logits_only,
+            ) = self._inference_single_view(image, detailed=detailed)
 
-        # Resize to original shape if needed
+        # Resize fused head logits if needed
         if seg_logits.shape[-2:] != original_shape:
             seg_logits = F.interpolate(
                 seg_logits.unsqueeze(0),
                 size=original_shape,
-                mode='bilinear',
-                align_corners=False
+                mode="bilinear",
+                align_corners=False,
             ).squeeze(0)
 
         # Resize individual head logits if needed
-        if semantic_logits_only is not None and semantic_logits_only.shape[-2:] != original_shape:
+        if (
+            semantic_logits_only is not None
+            and semantic_logits_only.shape[-2:] != original_shape
+        ):
             semantic_logits_only = F.interpolate(
                 semantic_logits_only.unsqueeze(0),
                 size=original_shape,
-                mode='bilinear',
-                align_corners=False
+                mode="bilinear",
+                align_corners=False,
             ).squeeze(0)
 
-        if instance_logits_only is not None and instance_logits_only.shape[-2:] != original_shape:
+        if (
+            instance_logits_only is not None
+            and instance_logits_only.shape[-2:] != original_shape
+        ):
             instance_logits_only = F.interpolate(
                 instance_logits_only.unsqueeze(0),
                 size=original_shape,
-                mode='bilinear',
-                align_corners=False
+                mode="bilinear",
+                align_corners=False,
             ).squeeze(0)
 
         # ===== Post-processing =====
 
         # 1. Map prompts to actual class IDs (handle synonyms)
         if self.num_classes != self.num_prompts:
+            # seg_logits.shape: [num_queries, H, W] -> [1, num_queries, H, W]
             seg_logits = seg_logits.unsqueeze(0)
+
+            # 把query_idx转换为one-hot向量，比如原来的query_idx=[0, 1, 1, 2]，得到的one_hot向量为：
+            # [[1, 0, 0],
+            #  [0, 1, 0],
+            #  [0, 1, 0],
+            #  [0, 0, 1]]
             cls_index = F.one_hot(self.query_indices, num_classes=self.num_classes)
+
+            """
+            cls_index.shape: [num_queries, num_cls]
+            cls_index.T 计算转置，让每个类占一行 [num_queries, num_cls]->[num_cls, num_queries],转置后的cls_index为：
+            [[1, 0, 0, 0],
+             [0, 1, 1, 0],
+             [0, 0, 0, 1]]
+            view 把cls_index转换为[num_cls, num_queries, 1, 1], 扩展维度以便与seg_logits进行广播运算
+            现在的cls_index=[
+                [ [[1]], [[0]], [[0]], [[0]] ],
+                [ [[0]], [[1]], [[1]], [[0]] ],
+                [ [[0]], [[0]], [[0]], [[1]] ]
+            ]
+
+            广播运算的特点是让不同的数组（或张量）在进行算术运算时，自动“扩展”成兼容的形状，而无需复制数据。
+            """
             cls_index = cls_index.T.view(self.num_classes, self.num_prompts, 1, 1)
+
+            """
+            相乘之前: seg_logits.shape: [1, num_queries, h, w], cls_index.shape: [num_cls, num_queries, 1, 1]
+            相乘时：
+                触发广播机制将seg_logits扩展到num_cls个类别: seg_logits.shape: [num_cls, num_queries, h, w]
+                假设图像h=1, w=2 共有2个像素:
+                    seg_logits 存了这个像素在4个查询词上的置信度
+                    seg_logits_broadcast = [
+                        [ [[0.6, 0.9]], [[0.4, 0.7]], [[0.3, 0.1]], [[0.2, 0.8]] ],  # 给类别0用
+                        [ [[0.6, 0.9]], [[0.4, 0.7]], [[0.3, 0.9]], [[0.2, 0.8]] ],  # 给类别1用(复制)
+                        [ [[0.6, 0.9]], [[0.4, 0.7]], [[0.3, 0.1]], [[0.2, 0.8]] ],  # 给类别2用(复制)
+                    ]
+                    上面[[0.6, 0.9]]代表一个查询词对应的图像概率图，包含了每个像素位置存在该实例的概率
+                    所以上面共有四个查询词的概率图: [[0.6, 0.9]], [[0.4, 0.7]], [[0.3, 0.1]], [[0.2, 0.8]]
+                    第2,3行是为了广播复制的第一行, 内容一样
+            接下来逐元素相乘 = [
+                    [ [[0.6x1, 0.9x1]], [[0.4x0, 0.7x0]], [[0.3x0, 0.1x0]], [[0.2x0, 0.8x0]] ],
+                    [ [[0.6x0, 0.9x0]], [[0.4x1, 0.7x1]], [[0.3x1, 0.9x1]], [[0.2x0, 0.8x0]] ], 
+                    [ [[0.6x0, 0.9x0]], [[0.4x0, 0.7x0]], [[0.3x0, 0.1x0]], [[0.2x1, 0.8x1]] ], 
+                ]
+                逐元素相乘时才可以看到刚才的广播操作的作用, 我们把cls_index中的每一行与seg_logits_broadcast的每一行相乘
+                因为seg_logits被广播扩展到了num_cls个类别, 与cls_index一致, 所以可以执行相乘
+            相乘结果 = [
+                    [ [[0.6, 0.9]], [[0.0, 0.0]], [[0.0, 0.0]], [[0.0, 0.0]] ],
+                    [ [[0.0, 0.0]], [[0.4, 0.7]], [[0.3, 0.9]], [[0.0, 0.0]] ], 
+                    [ [[0.0, 0.0]], [[0.0, 0.0]], [[0.0, 0.0]], [[0.2, 0.8]] ], 
+                ]
+                得到的结果中, 每个类比(每一行), 只保留了属于该类别的查询词的概率图
+                相乘之后: seg_logits.shape: [num_cls,num_queries, h, w]
+            取max(1): 
+                遍历每个类别:
+                    [ [[0.6, 0.9]], [[0.0, 0.0]], [[0.0, 0.0]], [[0.0, 0.0]] ]
+                    ...
+                遍历每个像素:
+                    [0.6, 0.0, 0.0, 0.0]
+                    ...
+                在num_queries(列)维度上取最大值
+                    max([0.6, 0, 0, 0, 0]) = 0.6
+                    ...
+                遍历结束得到最终结果 (values, indices)
+                    values, indices的shape都是[num_cls, h, w]
+                    values=[
+                        [ [0.6, 0.9] ],
+                        [ [0.4, 0.9] ], 
+                        [ [0.2, 0.8] ]
+                    ]
+                    indices=[
+                        [ [0, 0] ],
+                        [ [1, 2] ], 
+                        [ [3, 3] ]
+                    ]
+            取max(1)[0]: 相当于取(values, indices)中的values
+            最终结果seg_logits=values
+            """
             seg_logits = (seg_logits * cls_index).max(1)[0]
 
         # 2. Get final prediction (argmax)
+        # 对于每个像素从num_cls个类别中取出最大概率值为该像素类别
+        # argmax(dim=0) 的意思是固定第1,2维度，在第0维度(类别维度)中找最大值索引
+        # 以上面得到seg_logits为例, 遍历每个像素取每个中的3个类别值:
+        # 第一个像素 [0.6, 0.4, 0.2] -> 最大值索引0
+        # 第二个像素 [0.9, 0.9, 0.8] -> 最大值索引为0(有两个相同最大值时，argmax 取第一个出现的索引)
+        # 最终返回 [[0,0]], 对应shape:[h,w]
         seg_pred = torch.argmax(seg_logits, dim=0)
 
         # 3. Apply probability threshold (filter low-confidence pixels to background)
@@ -439,7 +572,7 @@ class SAM3RSSegmentor:
             seg_pred=seg_pred,
             per_class_results=per_class_results,
             semantic_pred=semantic_pred,
-            instance_pred=instance_pred
+            instance_pred=instance_pred,
         )
 
         return result
@@ -448,7 +581,7 @@ class SAM3RSSegmentor:
         self,
         image_paths: List[str],
         save_dir: Optional[str] = None,
-        detailed: bool = False
+        detailed: bool = False,
     ) -> List[SegmentationResult]:
         """
         Predict segmentation for a batch of images.
@@ -500,14 +633,14 @@ class SAM3RSSegmentor:
         os.makedirs(class_masks_dir, exist_ok=True)
 
         for class_name, class_data in result.per_class_results.items():
-            if class_data['masks'].shape[0] > 0:
+            if class_data["masks"].shape[0] > 0:
                 # Combine all instance masks for this class
-                class_mask = class_data['masks'].cpu().numpy()
+                class_mask = class_data["masks"].cpu().numpy()
                 combined_mask = class_mask.max(axis=0)  # OR operation
                 binary_mask = (combined_mask > 0.5).astype(np.uint8) * 255
 
-                mask_img = Image.fromarray(binary_mask, mode='L')
+                mask_img = Image.fromarray(binary_mask, mode="L")
                 # Use mapped class ID instead of raw name for filename
-                class_id = self.prompts['mapping'].get(class_name, 0)
+                class_id = self.prompts["mapping"].get(class_name, 0)
                 mask_path = os.path.join(class_masks_dir, f"class_{class_id}.png")
                 mask_img.save(mask_path)
