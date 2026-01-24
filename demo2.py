@@ -185,6 +185,7 @@ def main():
 
     # Prompts file for multi-class segmentation
     prompts_file = os.path.join(script_dir, "configs/loveda_classes.txt")
+    # prompts_file = os.path.join(script_dir, "configs/prompts_example.txt")
 
     # Output directory
     output_dir = os.path.join(TEST_DIR, "sam3", "head_comparison")
@@ -222,19 +223,6 @@ def main():
 
     print("\n" + "=" * 60)
     print("Demo2 completed!")
-    print("=" * 60)
-    print(f"\nResults saved to: {output_dir}")
-    print("\nSaved files structure:")
-    print("  {img_name}_semantic_head_pred.png      (binary mask)")
-    print("  {img_name}_semantic_head_color.png      (colored mask)")
-    print("  {img_name}_semantic_head_overlay.png    (overlay)")
-    print("  {img_name}_instance_head_pred.png")
-    print("  {img_name}_instance_head_color.png")
-    print("  {img_name}_instance_head_overlay.png")
-    print("  {img_name}_dual_head_pred.png")
-    print("  {img_name}_dual_head_color.png")
-    print("  {img_name}_dual_head_overlay.png")
-    print("=" * 60 + "\n")
 
 
 if __name__ == "__main__":
