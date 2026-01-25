@@ -1,10 +1,10 @@
 """
-Demo script for SAM3-RS using the new segmentor wrapper.
+Simplified demo for SAM3-RS segmentor with head-based visualization.
 
-This script demonstrates:
-- Single image inference with single prompt
-- Single image inference with multi-class prompts
-- Result visualization and saving
+This demo demonstrates:
+- Using segmentor.predict_single() with different head configurations
+- Visualizing results based on head selection (semantic/instance/dual)
+- Saving results with clear naming for comparison
 """
 
 import torch
@@ -12,277 +12,224 @@ from PIL import Image
 import matplotlib.pyplot as plt
 import numpy as np
 import os
+import sys
 
-# Import from new SAM3-RS structure
 from segmentor import SAM3RSSegmentor, InferenceConfig
-
-# from utils import visualize_prediction, save_mask
-
 from workspace.configs.path_conf import ROOT_DIR, TEST_DIR
 from workspace.scripts.get_weights import get_weight_path
 from workspace.scripts.get_data import get_data_path
 
+SAM_RS_DIR = os.path.join(ROOT_DIR, "workspace/core/sam3-rs")
+sys.path.insert(0, SAM_RS_DIR)
 
-def save_result_as_instance_seg(image, image_name, result, output_path, mode="mask"):
+# Color palette for visualization (LoveDA style)
+COLORS = [
+    [0, 0, 0],        # 0: background - black
+    [160, 140, 110],   # 1: bareland
+    [100, 100, 100],   # 2: road
+    [200, 70, 50],     # 3: car
+    [40, 100, 50],     # 4: tree
+    [50, 120, 180],    # 5: water
+    [220, 190, 60],    # 6: cropland
+    [140, 80, 70],     # 7: building
+]
+
+
+def save_prediction_mask(seg_pred, output_path):
     """
-    Visualize and save instance segmentation result.
+    Save binary prediction mask.
 
     Args:
-        image: PIL Image object
-        image_name: image name
-        result: SAM3 output dict
-            - masks: Tensor [N, H, W]
-            - boxes: Tensor [N, 4]
-            - scores: Tensor [N]
-        output_path: Path to save image
-        mode: "mask" or "all"
+        seg_pred: [H, W] numpy array with class IDs
+        output_path: Path to save the mask
     """
-    objects_num = len(result["scores"])
-
-    if mode == "mask":
-        # Create combined binary mask
-        if len(result["masks"]) > 0:
-            first_mask = result["masks"][0].squeeze(0).cpu()
-            mask_height, mask_width = first_mask.shape
-            combined_mask = np.zeros((mask_height, mask_width), dtype=np.uint8)
-
-            for i in range(objects_num):
-                mask = result["masks"][i].squeeze(0).cpu().numpy()
-                combined_mask = np.logical_or(combined_mask, mask).astype(np.uint8)
-
-            # Convert to binary mask (0=background, 255=mask)
-            combined_mask = combined_mask * 255
-            mask_image = Image.fromarray(combined_mask)
-            instance_seg_path = os.path.join(
-                output_path, f"{image_name}_instance_seg.png"
-            )
-            mask_image.save(instance_seg_path)
-            print(f"Saved mask: {instance_seg_path}")
-
-        # Save semantic segmentation if available
-        if "semantic_seg" in result and result["semantic_seg"] is not None:
-            semantic_seg = result["semantic_seg"].squeeze(0).squeeze(0).cpu()
-            semantic_seg_binary = (semantic_seg > 0.5).numpy().astype(np.uint8) * 255
-            semantic_seg_image = Image.fromarray(semantic_seg_binary, mode="L")
-            semantic_seg_path = os.path.join(
-                output_path, f"{image_name}_semantic_seg.png"
-            )
-            semantic_seg_image.save(semantic_seg_path)
-            print(f"Saved semantic segmentation: {semantic_seg_path}")
-
-    elif mode == "all":
-        plt.figure(figsize=(12, 8))
-        plt.imshow(image)
-
-        # Use colors for visualization
-        colors = ["red", "blue", "green", "yellow", "purple", "orange", "cyan"]
-
-        for i in range(objects_num):
-            color = colors[i % len(colors)]
-
-            # Draw mask
-            mask = result["masks"][i].squeeze(0).cpu().numpy()
-            plt.imshow(mask, alpha=0.3, cmap="binary", color=color)
-
-            # Draw bbox
-            box = result["boxes"][i].cpu().numpy()
-            w, h = image.size
-            prob = result["scores"][i].item()
-
-            # Convert to matplotlib format
-            rect = plt.Rectangle(
-                (box[0], box[1]),
-                box[2] - box[0],
-                box[3] - box[1],
-                linewidth=2,
-                edgecolor=color,
-                facecolor="none",
-            )
-            plt.gca().add_patch(rect)
-            plt.text(
-                box[0],
-                box[1] - 5,
-                f"(id={i}, {prob:.2f})",
-                color=color,
-                fontsize=10,
-                fontweight="bold",
-            )
-
-        plt.axis("off")
-        plt.tight_layout()
-        plt.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
-        plt.close()
-        print(f"Saved visualization: {output_path}")
+    mask = seg_pred.astype(np.uint8)
+    # Debug: show ID distribution to verify non-zero presence
+    unique_vals = np.unique(mask)
+    pred_img = Image.fromarray(mask, mode="L")
+    pred_img.save(output_path)
+    print(f"  Saved: {os.path.basename(output_path)}")
 
 
-def save_result_as_semantic_seg(image, result, output_path, save_class_masks=True):
+def save_colored_mask(seg_pred, colors, output_path):
     """
-    Visualize and save semantic segmentation result.
+    Save colored segmentation mask.
+
+    Args:
+        seg_pred: [H, W] numpy array with class IDs
+        colors: List of RGB colors for each class
+        output_path: Path to save the mask
+    """
+    h, w = seg_pred.shape
+    colored_mask = np.zeros((h, w, 3), dtype=np.uint8)
+
+    for i, color in enumerate(colors):
+        mask_area = seg_pred == i
+        if mask_area.sum() > 0:
+            colored_mask[mask_area] = color
+
+    mask_img = Image.fromarray(colored_mask)
+    mask_img.save(output_path)
+    print(f"  Saved: {os.path.basename(output_path)}")
+
+
+def save_overlay(image, seg_pred, colors, output_path, alpha=0.5):
+    """
+    Save overlay of segmentation on original image.
 
     Args:
         image: PIL Image
-        result: SAM3-RS SegmentationResult
-        output_path: Path to save output
-        save_class_masks: Whether to save per-class masks
+        seg_pred: [H, W] numpy array with class IDs
+        colors: List of RGB colors for each class
+        output_path: Path to save the overlay
+        alpha: Transparency of the mask (0-1)
     """
-    img_width, img_height = image.size
+    h, w = seg_pred.shape
+    colored_mask = np.zeros((h, w, 3), dtype=np.uint8)
 
-    # Get prediction
-    seg_pred = result.seg_pred.cpu().numpy()
-
-    # Save prediction mask
-    pred_img = Image.fromarray(seg_pred.astype(np.uint8), mode="L")
-    base_name = os.path.splitext(output_path)[0]
-    pred_path = f"{base_name}_pred.png"
-    pred_img.save(pred_path)
-    print(f"Saved prediction: {pred_path}")
-
-    # Save per-class binary masks
-    if save_class_masks:
-        class_masks_dir = f"{base_name}_class_masks"
-        os.makedirs(class_masks_dir, exist_ok=True)
-
-        for class_name in result.per_class_results.keys():
-            class_data = result.per_class_results[class_name]
-            masks = class_data["masks"]
-
-            if masks.shape[0] > 0:
-                # Combine all instance masks for this class
-                class_mask = masks.cpu().numpy().max(axis=0)
-                binary_mask = (class_mask > 0.5).astype(np.uint8) * 255
-
-                mask_img = Image.fromarray(binary_mask, mode="L")
-                class_mask_path = os.path.join(class_masks_dir, f"{class_name}.png")
-                mask_img.save(class_mask_path)
-                print(f"Saved class mask: {class_mask_path}")
-
-    # Create overlay visualization
-    colors = [
-        [0, 0, 0],  # 0: background - black
-        [160, 140, 110],  # 1: bareland
-        [100, 100, 100],  # 2: road
-        [200, 70, 50],  # 3: car
-        [40, 100, 50],  # 4: tree
-        [50, 120, 180],  # 5: water
-        [220, 190, 60],  # 6: cropland
-        [140, 80, 70],  # 7: building
-    ]
-
-    colored_mask = np.zeros((img_height, img_width, 3), dtype=np.uint8)
-    for i in range(len(colors)):
+    for i, color in enumerate(colors):
         mask_area = seg_pred == i
         if mask_area.sum() > 0:
-            colored_mask[mask_area] = colors[i]
+            colored_mask[mask_area] = color
 
     mask_rgb = Image.fromarray(colored_mask)
-    overlay = Image.blend(image.convert("RGB"), mask_rgb, alpha=0.5)
-    overlay_path = f"{base_name}_overlay.png"
-    overlay.save(overlay_path)
-    print(f"Saved overlay: {overlay_path}")
+
+    if mask_rgb.size != image.size:
+        mask_rgb = mask_rgb.resize(image.size, Image.Resampling.NEAREST)
+
+    overlay = Image.blend(image.convert("RGB"), mask_rgb, alpha=alpha)
+    overlay.save(output_path)
+    print(f"  Saved: {os.path.basename(output_path)}")
 
 
-def single_img_single_prompt(
-    segmentor: SAM3RSSegmentor,
-    image_path: str,
-    prompt: str,
-    output_path: str,
-    mode: str = "mask",
-):
+def save_heatmaps(logits, base_path, normalize=True):
     """
-    Single image inference with a single prompt (instance segmentation).
-
-    Args:
-        segmentor: SAM3RSSegmentor instance
-        image_path: Path to input image
-        prompt: Text prompt (e.g., "building", "road")
-        output_path: Path to save result
-        mode: "mask" or "all"
+    Save per-class heatmaps from logits as grayscale PNGs.
+    logits: [C, H, W] tensor on CPU.
     """
-    print(f"\n{'='*60}")
-    print(f"Single Prompt Inference")
-    print(f"Image: {os.path.basename(image_path)}")
-    print(f"Prompt: '{prompt}'")
-    print(f"{'='*60}\n")
-
-    # Load image
-    image = Image.open(image_path).convert("RGB")
-    image_name = os.path.basename(image_path).split(".")[0]
-
-    # Get instance segmentation from SAM3
-    inference_state = segmentor.processor.set_image(image)
-    output = segmentor.processor.set_text_prompt(state=inference_state, prompt=prompt)
-
-    if output["masks"].numel() == 0:
-        print(f"⚠ No masks found for prompt: '{prompt}'")
+    if logits is None:
         return
+    logits_np = logits.cpu().numpy()
+    c, h, w = logits_np.shape
+    for idx in range(c):
+        heat = logits_np[idx]
+        if normalize:
+            vmin, vmax = heat.min(), heat.max()
+            if vmax > vmin:
+                heat = (heat - vmin) / (vmax - vmin)
+            else:
+                heat = np.zeros_like(heat)
+        heat_img = Image.fromarray((heat * 255).astype(np.uint8), mode="L")
+        heat_img.save(f"{base_path}_{idx}.png")
 
-    # Save results
-    save_result_as_instance_seg(image, image_name, output, output_path, mode)
 
-    print(f"✓ Completed single prompt inference\n")
-    return output
-
-
-def single_img_multi_prompts(
-    segmentor: SAM3RSSegmentor, image_path: str, prompts_file: str, output_path: str
-):
+def save_heatmaps_color(logits, base_path, cmap="jet", normalize=True):
     """
-    Single image inference with multi-class prompts (semantic segmentation).
+    Save per-class heatmaps from logits as colored PNGs using matplotlib colormaps.
+    logits: [C, H, W] tensor on CPU.
+    """
+    if logits is None:
+        return
+    logits_np = logits.cpu().numpy()
+    c, h, w = logits_np.shape
+    for idx in range(c):
+        heat = logits_np[idx]
+        if normalize:
+            vmin, vmax = heat.min(), heat.max()
+            if vmax > vmin:
+                heat = (heat - vmin) / (vmax - vmin)
+            else:
+                heat = np.zeros_like(heat)
+        plt.figure(figsize=(6, 4))
+        plt.axis("off")
+        plt.imshow(heat, cmap=cmap, vmin=0.0, vmax=1.0)
+        plt.tight_layout(pad=0)
+        plt.savefig(f"{base_path}_{idx}_color.png", dpi=200, bbox_inches="tight", pad_inches=0)
+        plt.close()
+
+
+def save_results_from_single_inference(image, result, base_name, colors=COLORS, save_heatmap=False):
+    """
+    Save all head results from a single inference call.
+
+    Args:
+        image: PIL Image
+        result: SegmentationResult from segmentor.predict_single() with dual head enabled
+        base_name: Base name for output files (without extension)
+        colors: Color palette for visualization
+    """
+    print(f"\n  Saving results from single inference:")
+
+    # Only save final fused result by default
+    dual_pred = result.seg_pred.cpu().numpy()
+    base_path = f"{base_name}_dual_head"
+    print(f"  Saving dual_head results...")
+    # save_prediction_mask(dual_pred, f"{base_path}_pred.png")
+    save_colored_mask(dual_pred, colors, f"{base_path}_color.png")
+    save_overlay(image, dual_pred, colors, f"{base_path}_overlay.png")
+
+    if save_heatmap:
+        # Save semantic and instance logits heatmaps per class
+        if result.semantic_logits is not None:
+            save_heatmaps(result.semantic_logits, f"{base_path}_semantic_heat")
+            # save_heatmaps_color(result.semantic_logits, f"{base_path}_semantic_heat")
+        if result.instance_logits is not None:
+            save_heatmaps(result.instance_logits, f"{base_path}_instance_heat")
+            # save_heatmaps_color(result.instance_logits, f"{base_path}_instance_heat")
+
+
+def run_single_inference(segmentor, image_path, output_dir, img_name, save_heatmap=False):
+    """
+    Run inference once with dual head enabled, save all three results.
 
     Args:
         segmentor: SAM3RSSegmentor instance
         image_path: Path to input image
-        prompts_file: Path to prompts config file
-        output_path: Path to save result
+        output_dir: Directory to save results
+        img_name: Base name for output files
     """
-    print(f"\n{'='*60}")
-    print(f"Multi-Class Prompt Inference")
-    print(f"Image: {os.path.basename(image_path)}")
-    print(f"Prompts file: {prompts_file}")
-    print(f"{'='*60}\n")
-
     # Load image
     image = Image.open(image_path).convert("RGB")
 
-    # Run semantic segmentation with multiple classes
-    result = segmentor.predict_single(image_path, detailed=True)
+    # Run single inference with dual head
+    print("\n" + "=" * 60)
+    print("Running Single Inference (Dual Head Enabled)")
+    print("=" * 60)
+    print(f"use_semantic_head: {segmentor.config.use_semantic_head}")
+    print(f"use_instance_head: {segmentor.config.use_instance_head}")
 
-    # Save results
-    save_result_as_semantic_seg(image, result, output_path, save_class_masks=True)
+    result = segmentor.predict_single(image_path, detailed=False)
 
-    # Print summary
-    print(f"\nPrediction shape: {result.seg_pred.shape}")
-    print(
-        f"Number of classes detected: {len(set(result.seg_pred.cpu().numpy().flatten()))}"
+    # Save all results from this single inference
+    save_results_from_single_inference(
+        image, result,
+        f"{output_dir}/{img_name}",
+        save_heatmap=save_heatmap,
     )
-    print(f"✓ Completed multi-class inference\n")
-
-    return result
 
 
 def main():
-    """Main entry point for demo."""
+    """Main entry point for demo2."""
 
     # ============ Configuration ============
 
-    # Get the directory where this script is located
-    current_dir = os.path.dirname(os.path.abspath(__file__))
+    # Get script directory
+    script_dir = os.path.dirname(os.path.abspath(__file__))
 
     # Model paths
     checkpoint_path = get_weight_path("sam3") + "/sam3.pt"
-    bpe_path = os.path.join(
-        current_dir, "sam3", "assets", "bpe_simple_vocab_16e6.txt.gz"
-    )
+    bpe_path = os.path.join(script_dir, "sam3", "assets", "bpe_simple_vocab_16e6.txt.gz")
 
-    # Test image path (modify as needed)
+    # Test image path
     dataset_path = get_data_path("LoveDA")
-    test_image_path = os.path.join(dataset_path, "Val/Urban/images_png/3549.png")
+    test_image_path = os.path.join(dataset_path, "Val/Urban/images_png/4168.png")
 
     # Prompts file for multi-class segmentation
-    prompts_file = os.path.join(current_dir, "configs/prompts_example.txt")
+    # prompts_file = os.path.join(script_dir, "configs/loveda_classes.txt")
+    prompts_file = os.path.join(script_dir, "configs/prompts_example.txt")
 
     # Output directory
-    output_dir = os.path.join(TEST_DIR, "sam3")
+    output_dir = os.path.join(TEST_DIR, "sam3", "head_comparison")
     os.makedirs(output_dir, exist_ok=True)
 
     # ============ Initialize SAM3-RS Segmentor ============
@@ -291,81 +238,33 @@ def main():
     print("Initializing SAM3-RS Segmentor")
     print("=" * 60 + "\n")
 
-    # Create configuration
     config = InferenceConfig(
         checkpoint_path=checkpoint_path,
         bpe_path=bpe_path,
         device="cuda",
-        confidence_threshold=0.5,
-        prob_threshold=0.0,
+        confidence_threshold=0.1,  # Lower threshold to keep more detections
+        prob_threshold=0.5,
         use_semantic_head=True,
-        use_instance_head=False,
-        use_presence_score=True,
-        slide_crop_size=0,  # No sliding window for small images
+        use_instance_head=True, 
+        use_presence_score=False,
+        slide_crop_size=0,        # No sliding window for small images
         slide_stride=1024,
-        prompts_file=prompts_file,  # Load multi-class prompts
+        prompts_file=prompts_file,
+        prompt_includes_bg=False
     )
 
-    # Initialize segmentor
     segmentor = SAM3RSSegmentor(config)
 
-    # ============ Run Demo ============
-
-    # Demo 1: Single prompt (instance segmentation)
-    # Note: This bypasses segmentor.predict_single() and uses SAM3 raw output directly
-    # It does NOT respect use_instance_head/use_semantic_head config
-    # print("\n" + "=" * 60)
-    # print("Demo 1: Single Prompt Inference (bypasses segmentor)")
-    # print("=" * 60)
-    # output_path_single = os.path.join(output_dir, "single_prompt")
-    # os.makedirs(output_path_single, exist_ok=True)
-    # single_img_single_prompt(
-    #     segmentor,
-    #     test_image_path,
-    #     prompt="tree",
-    #     output_path=output_path_single,
-    #     mode="mask",
-    # )
-
-    # Demo 2: Multi-class prompts (semantic segmentation)
-    print("\n" + "=" * 60)
-    print("Demo 2: Multi-Class Semantic Segmentation")
-    print("=" * 60)
-
-    output_path_multi = os.path.join(output_dir, "multi_class")
-    os.makedirs(output_path_multi, exist_ok=True)
+    # ============ Run Single Inference ============
 
     img_name = os.path.splitext(os.path.basename(test_image_path))[0]
-    single_img_multi_prompts(
-        segmentor,
-        test_image_path,
-        prompts_file=prompts_file,
-        output_path=os.path.join(output_path_multi, f"{img_name}_seg"),
-    )
 
-    # Demo 3: Large image with sliding window (optional)
-    # print("\n" + "=" * 60)
-    # print("Demo 3: Large Image with Sliding Window")
-    # print("(Skipping - requires large image)")
-    # print("=" * 60)
+    run_single_inference(segmentor, test_image_path, output_dir, img_name, save_heatmap=True)
 
-    # Uncomment to test sliding window
-    # large_image_path = "data/large_image.tif"
-    # config_large = InferenceConfig(
-    #     checkpoint_path=checkpoint_path,
-    #     bpe_path=bpe_path,
-    #     device='cuda',
-    #     slide_crop_size=1024,
-    #     slide_stride=512,
-    #     prompts_file=prompts_file
-    # )
-    # segmentor_large = SAM3RSSegmentor(config_large)
-    # result = segmentor_large.predict_single(large_image_path)
+    # ============ Summary ============
 
     print("\n" + "=" * 60)
-    print("Demo completed!")
-    print(f"Results saved to: {output_dir}")
-    print("=" * 60 + "\n")
+    print("Demo2 completed!")
 
 
 if __name__ == "__main__":

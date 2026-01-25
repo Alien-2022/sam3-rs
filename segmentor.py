@@ -29,7 +29,9 @@ class InferenceConfig:
     device: str = "cuda"
     confidence_threshold: float = 0.5
     prob_threshold: float = 0.0
-    bg_idx: int = 0
+    bg_idx: Optional[int] = 0
+    # Set to True only when prompts.txt 已包含背景类；默认 False 表示需要注入背景通道
+    prompt_includes_bg: bool = False
 
     # Head selection (SegEarthOV3 innovation)
     use_semantic_head: bool = True
@@ -54,11 +56,9 @@ class SegmentationResult:
     # {prompt_name: {masks, boxes, scores, ...}}
     per_class_results: Dict[str, Dict]
 
-    # Individual head predictions (for comparison/analysis)
-    # [H, W] from semantic head only
-    semantic_pred: Optional[torch.Tensor] = None
-    # [H, W] from instance head only
-    instance_pred: Optional[torch.Tensor] = None
+    # Individual head logits (for analysis / visualization)
+    semantic_logits: Optional[torch.Tensor] = None  # [num_classes, H, W]
+    instance_logits: Optional[torch.Tensor] = None  # [num_classes, H, W]
 
 
 class SAM3RSSegmentor:
@@ -182,7 +182,7 @@ class SAM3RSSegmentor:
 
         inference_state = None
         with torch.no_grad(), torch.autocast(
-            device_type=self.device, dtype=torch.bfloat16
+            device_type=self.device.type, dtype=torch.bfloat16
         ):
             inference_state = self.processor.set_image(image)
 
@@ -238,10 +238,13 @@ class SAM3RSSegmentor:
                             # NOTE: Score weighting is applied via presence_score at the end
                             # inst_current = torch.max(inst_current, inst_logits)
                             inst_current = torch.max(
-                                inst_current, inst_logits * inst_score
+                                inst_current, inst_logits
                             )
 
                     current_logits = torch.max(current_logits, inst_current)
+                    print("current_logits shape after instance head: ", current_logits.shape)
+                    print("current_logits min after instance head: ", current_logits.min())
+                    print("current_logits max after instance head: ", current_logits.max())
                     instance_logits_only[prompt_idx] = inst_current
 
                 # 2. Semantic head
@@ -278,10 +281,10 @@ class SAM3RSSegmentor:
                 seg_logits[prompt_idx] = current_logits
 
         # Clean up inference_state to free GPU memory
-        if inference_state is not None:
-            for key in list(inference_state.keys()):
-                if isinstance(inference_state[key], torch.Tensor):
-                    del inference_state[key]
+        # if inference_state is not None:
+        #     for key in list(inference_state.keys()):
+        #         if isinstance(inference_state[key], torch.Tensor):
+        #             del inference_state[key]
 
         return seg_logits, per_class_results, semantic_logits_only, instance_logits_only
 
@@ -293,9 +296,9 @@ class SAM3RSSegmentor:
 
         Returns:
             seg_logits: Fused segmentation for the whole image
-            per_class_results: Detailed results (aggregated from crops)
-            semantic_logits_only: [num_prompts, H, W] from semantic head only (None if not enabled)
-            instance_logits_only: [num_prompts, H, W] from instance head only (None if not enabled)
+            per_class_results: Detailed results (aggregated from first crop when detailed=True)
+            semantic_logits_only: None (skip to save memory for large images)
+            instance_logits_only: None (skip to save memory for large images)
         """
         w_img, h_img = image.size
         crop_size = self.config.slide_crop_size
@@ -305,20 +308,9 @@ class SAM3RSSegmentor:
         seg_logits = torch.zeros((self.num_prompts, h_img, w_img), device=self.device)
         count_mat = torch.zeros((1, h_img, w_img), device=self.device)
 
-        # Initialize separate logits for individual heads
-        if self.config.use_semantic_head:
-            semantic_logits_only = torch.zeros(
-                (self.num_prompts, h_img, w_img), device=self.device
-            )
-        else:
-            semantic_logits_only = None
-
-        if self.config.use_instance_head:
-            instance_logits_only = torch.zeros(
-                (self.num_prompts, h_img, w_img), device=self.device
-            )
-        else:
-            instance_logits_only = None
+        # Skip storing semantic/instance logits in sliding mode to reduce memory footprint
+        semantic_logits_only = None
+        instance_logits_only = None
 
         # Calculate number of patches
         h_grids = max((h_img - crop_size + stride - 1) // stride + 1, 1)
@@ -344,7 +336,7 @@ class SAM3RSSegmentor:
                 crop_img = image.crop((x1, y1, x2, y2))
 
                 # Inference on crop
-                crop_logits, crop_results, crop_semantic, crop_instance = (
+                crop_logits, crop_results, _, _ = (
                     self._inference_single_view(crop_img, detailed=detailed)
                 )
 
@@ -352,21 +344,12 @@ class SAM3RSSegmentor:
                 seg_logits[:, y1:y2, x1:x2] += crop_logits
                 count_mat[:, y1:y2, x1:x2] += 1
 
-                if semantic_logits_only is not None and crop_semantic is not None:
-                    semantic_logits_only[:, y1:y2, x1:x2] += crop_semantic
-                if instance_logits_only is not None and crop_instance is not None:
-                    instance_logits_only[:, y1:y2, x1:x2] += crop_instance
-
                 # Store detailed results for first patch only (or you can aggregate)
                 if detailed and h_idx == 0 and w_idx == 0:
                     per_class_results = crop_results
 
         # Average overlapping regions
         seg_logits = seg_logits / count_mat
-        if semantic_logits_only is not None:
-            semantic_logits_only = semantic_logits_only / count_mat
-        if instance_logits_only is not None:
-            instance_logits_only = instance_logits_only / count_mat
 
         return seg_logits, per_class_results, semantic_logits_only, instance_logits_only
 
@@ -442,6 +425,9 @@ class SAM3RSSegmentor:
 
         # ===== Post-processing =====
 
+        print("num_classes: ", self.num_classes)
+        print("num_prompts: ",self.num_prompts)
+
         # 1. Map prompts to actual class IDs (handle synonyms)
         if self.num_classes != self.num_prompts:
             # seg_logits.shape: [num_queries, H, W] -> [1, num_queries, H, W]
@@ -470,6 +456,7 @@ class SAM3RSSegmentor:
             广播运算的特点是让不同的数组（或张量）在进行算术运算时，自动“扩展”成兼容的形状，而无需复制数据。
             """
             cls_index = cls_index.T.view(self.num_classes, self.num_prompts, 1, 1)
+            print("cls_index shape: ", cls_index.shape)
 
             """
             相乘之前: seg_logits.shape: [1, num_queries, h, w], cls_index.shape: [num_cls, num_queries, 1, 1]
@@ -527,43 +514,68 @@ class SAM3RSSegmentor:
             seg_logits = (seg_logits * cls_index).max(1)[0]
 
         # 2. Get final prediction (argmax)
+        # 通过上面的处理同一个类别中的多个查询词已经融合到一起了
         # 对于每个像素从num_cls个类别中取出最大概率值为该像素类别
         # argmax(dim=0) 的意思是固定第1,2维度，在第0维度(类别维度)中找最大值索引
         # 以上面得到seg_logits为例, 遍历每个像素取每个中的3个类别值:
         # 第一个像素 [0.6, 0.4, 0.2] -> 最大值索引0
         # 第二个像素 [0.9, 0.9, 0.8] -> 最大值索引为0(有两个相同最大值时，argmax 取第一个出现的索引)
         # 最终返回 [[0,0]], 对应shape:[h,w]
-        seg_pred = torch.argmax(seg_logits, dim=0)
 
-        # 3. Apply probability threshold (filter low-confidence pixels to background)
-        # 相比于sam3的小改进点
-        # 假设 presence_score = 0.558 > confidence_threshold = 0.5 → 实例保留
-        # 这个时候可以用prob_threshold进行精细化控制，只保留实例中概率值大的像素
-        if self.config.prob_threshold > 0:
-            max_vals = seg_logits.max(0)[0]
-            seg_pred[max_vals < self.config.prob_threshold] = self.config.bg_idx
+        print("before argmax seg_logits shape: ", seg_logits.shape)
+        print("before argmax seg_logits min: ", seg_logits.min())
+        print("before argmax seg_logits max: ", seg_logits.max())
 
-        # Compute individual head predictions
-        semantic_pred = None
-        instance_pred = None
+        # Unified prediction logic (single/multi-class)
+        bg_idx = 0 if self.config.bg_idx is None else self.config.bg_idx
+
+        def logits_to_pred(logits: torch.Tensor) -> torch.Tensor:
+            # If prompts do NOT include background, explicitly add a zero-logit background channel
+            if not self.config.prompt_includes_bg:
+                bg_pad = torch.zeros((1, *logits.shape[1:]), device=logits.device, dtype=logits.dtype)
+                logits_for_argmax = torch.cat([bg_pad, logits], dim=0)
+                pred = torch.argmax(logits_for_argmax, dim=0)
+
+                # Map background to bg_idx; keep foreground IDs contiguous starting from 1
+                if bg_idx != 0:
+                    pred = torch.where(pred == 0, torch.tensor(bg_idx, device=pred.device), pred + bg_idx - 1)
+            else:
+                pred = torch.argmax(logits, dim=0)
+
+            if self.config.prob_threshold > 0:
+                max_vals = logits.max(0)[0]
+                pred[max_vals < self.config.prob_threshold] = bg_idx
+            elif not self.config.prompt_includes_bg:
+                # Fallback: if no explicit background prompt and no prob_threshold, treat non-positive logits as background
+                max_vals = logits.max(0)[0]
+                pred[max_vals <= 0] = bg_idx
+            return pred
+
+        seg_pred = logits_to_pred(seg_logits)
+
+        print("after argmax seg_pred shape: ", seg_pred.shape)
+        print("after argmax seg_pred min: ", seg_pred.min())
+        print("after argmax seg_pred max: ", seg_pred.max())
+
+        # Prepare individual head logits (no argmax/threshold here)
+        semantic_logits = None
+        instance_logits = None
 
         if semantic_logits_only is not None:
-            # Map prompts to class IDs for semantic head
             if self.num_classes != self.num_prompts:
                 semantic_logits_only = semantic_logits_only.unsqueeze(0)
                 cls_index = F.one_hot(self.query_indices, num_classes=self.num_classes)
                 cls_index = cls_index.T.view(self.num_classes, self.num_prompts, 1, 1)
                 semantic_logits_only = (semantic_logits_only * cls_index).max(1)[0]
-            semantic_pred = torch.argmax(semantic_logits_only, dim=0)
+            semantic_logits = semantic_logits_only
 
         if instance_logits_only is not None:
-            # Map prompts to class IDs for instance head
             if self.num_classes != self.num_prompts:
                 instance_logits_only = instance_logits_only.unsqueeze(0)
                 cls_index = F.one_hot(self.query_indices, num_classes=self.num_classes)
                 cls_index = cls_index.T.view(self.num_classes, self.num_prompts, 1, 1)
                 instance_logits_only = (instance_logits_only * cls_index).max(1)[0]
-            instance_pred = torch.argmax(instance_logits_only, dim=0)
+            instance_logits = instance_logits_only
 
         # Prepare result
         result = SegmentationResult(
@@ -571,8 +583,8 @@ class SAM3RSSegmentor:
             seg_logits=seg_logits,
             seg_pred=seg_pred,
             per_class_results=per_class_results,
-            semantic_pred=semantic_pred,
-            instance_pred=instance_pred,
+            semantic_logits=semantic_logits,
+            instance_logits=instance_logits,
         )
 
         return result
