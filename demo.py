@@ -171,11 +171,11 @@ def save_results_from_single_inference(image, result, base_name, colors=COLORS, 
     if save_heatmap:
         # Save semantic and instance logits heatmaps per class
         if result.semantic_logits is not None:
-            save_heatmaps(result.semantic_logits, f"{base_path}_semantic_heat")
-            # save_heatmaps_color(result.semantic_logits, f"{base_path}_semantic_heat")
+            # save_heatmaps(result.semantic_logits, f"{base_path}_semantic_heat")
+            save_heatmaps_color(result.semantic_logits, f"{base_path}_semantic_heat")
         if result.instance_logits is not None:
-            save_heatmaps(result.instance_logits, f"{base_path}_instance_heat")
-            # save_heatmaps_color(result.instance_logits, f"{base_path}_instance_heat")
+            # save_heatmaps(result.instance_logits, f"{base_path}_instance_heat")
+            save_heatmaps_color(result.instance_logits, f"{base_path}_instance_heat")
 
 
 def run_single_inference(segmentor, image_path, output_dir, img_name, save_heatmap=False):

@@ -1,0 +1,33 @@
+base_config: ./base.yaml
+
+dataset:
+  data_root: datasets/LoveDA
+  # For official LoveDA layout (Val/{Urban,Rural}/{images_png,masks_png})
+  img_dir: Exp/img
+  mask_dir: Exp/mask
+  # will be formatted as eval/datasets/cls_loveda.txt
+  # read by the dataloader to know the class list and num_classes
+  cls_file: cls_loveda.txt
+  ignore_index: 255
+  reduce_zero_label: false
+  # Optional: use workspace NAS registry instead of local data_root
+  # When provided, will call workspace.scripts.get_data.get_data_path(data_key)
+  data_key: LoveDA
+
+segmentor:
+  checkpoint_path: assets/pretrain_weights/your_checkpoint.pth
+  # will be formatted as sam3/assets/bpe_simple_vocab_16e6.txt.gz
+  bpe_path: bpe_simple_vocab_16e6.txt.gz
+  # read by the model to build text prompts and map outputs.
+  prompts_file: cls_loveda.txt
+  confidence_threshold: 0.5
+  prob_threshold: 0.0
+  bg_idx: 0
+  prompt_includes_bg: true
+  # Optional: use workspace NAS registry for checkpoint
+  # When provided, will call workspace.scripts.get_weights.get_weight_path(weight_key)
+  weight_key: sam3
+
+output:
+  save_pred_dir: outputs/preds/loveda
+  metrics_json: outputs/metrics/loveda.json

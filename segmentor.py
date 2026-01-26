@@ -90,6 +90,8 @@ class SAM3RSSegmentor:
             checkpoint_path=config.checkpoint_path,
             device=config.device,
         )
+        # Ensure model weights on target device to avoid CPU/GPU dtype mismatches
+        model = model.to(self.device)
         self.processor = Sam3Processor(
             model, confidence_threshold=config.confidence_threshold, device=self.device
         )
@@ -181,6 +183,7 @@ class SAM3RSSegmentor:
             instance_logits_only = None
 
         inference_state = None
+        # Use bfloat16 autocast for RTX 50 series (significant speedup over float32)
         with torch.no_grad(), torch.autocast(
             device_type=self.device.type, dtype=torch.bfloat16
         ):
@@ -242,9 +245,9 @@ class SAM3RSSegmentor:
                             )
 
                     current_logits = torch.max(current_logits, inst_current)
-                    print("current_logits shape after instance head: ", current_logits.shape)
-                    print("current_logits min after instance head: ", current_logits.min())
-                    print("current_logits max after instance head: ", current_logits.max())
+                    # print("current_logits shape after instance head: ", current_logits.shape)
+                    # print("current_logits min after instance head: ", current_logits.min())
+                    # print("current_logits max after instance head: ", current_logits.max())
                     instance_logits_only[prompt_idx] = inst_current
 
                 # 2. Semantic head
@@ -262,14 +265,14 @@ class SAM3RSSegmentor:
                     current_logits = torch.max(current_logits, semantic_logits)
                     semantic_logits_only[prompt_idx] = semantic_logits
 
-                print(f"current prompt: {prompt_word}")
-                print(
-                    f"Instance logits range: [{inst_current.min():.3f}, {inst_current.max():.3f}]"
-                )
-                print(
-                    f"Semantic logits range: [{semantic_logits.min():.3f}, {semantic_logits.max():.3f}]"
-                )
-                print(f"Num instances: {num_instances}")
+                # print(f"current prompt: {prompt_word}")
+                # print(
+                #     f"Instance logits range: [{inst_current.min():.3f}, {inst_current.max():.3f}]"
+                # )
+                # print(
+                #     f"Semantic logits range: [{semantic_logits.min():.3f}, {semantic_logits.max():.3f}]"
+                # )
+                # print(f"Num instances: {num_instances}")
 
                 # 3. Presence score filtering
                 # NOTE: Following SegEarthOV3's approach: apply to fused result (both heads)
@@ -425,8 +428,8 @@ class SAM3RSSegmentor:
 
         # ===== Post-processing =====
 
-        print("num_classes: ", self.num_classes)
-        print("num_prompts: ",self.num_prompts)
+        # print("num_classes: ", self.num_classes)
+        # print("num_prompts: ",self.num_prompts)
 
         # 1. Map prompts to actual class IDs (handle synonyms)
         if self.num_classes != self.num_prompts:
@@ -456,7 +459,7 @@ class SAM3RSSegmentor:
             广播运算的特点是让不同的数组（或张量）在进行算术运算时，自动“扩展”成兼容的形状，而无需复制数据。
             """
             cls_index = cls_index.T.view(self.num_classes, self.num_prompts, 1, 1)
-            print("cls_index shape: ", cls_index.shape)
+            # print("cls_index shape: ", cls_index.shape)
 
             """
             相乘之前: seg_logits.shape: [1, num_queries, h, w], cls_index.shape: [num_cls, num_queries, 1, 1]
@@ -522,9 +525,9 @@ class SAM3RSSegmentor:
         # 第二个像素 [0.9, 0.9, 0.8] -> 最大值索引为0(有两个相同最大值时，argmax 取第一个出现的索引)
         # 最终返回 [[0,0]], 对应shape:[h,w]
 
-        print("before argmax seg_logits shape: ", seg_logits.shape)
-        print("before argmax seg_logits min: ", seg_logits.min())
-        print("before argmax seg_logits max: ", seg_logits.max())
+        # print("before argmax seg_logits shape: ", seg_logits.shape)
+        # print("before argmax seg_logits min: ", seg_logits.min())
+        # print("before argmax seg_logits max: ", seg_logits.max())
 
         # Unified prediction logic (single/multi-class)
         bg_idx = 0 if self.config.bg_idx is None else self.config.bg_idx
@@ -553,9 +556,9 @@ class SAM3RSSegmentor:
 
         seg_pred = logits_to_pred(seg_logits)
 
-        print("after argmax seg_pred shape: ", seg_pred.shape)
-        print("after argmax seg_pred min: ", seg_pred.min())
-        print("after argmax seg_pred max: ", seg_pred.max())
+        # print("after argmax seg_pred shape: ", seg_pred.shape)
+        # print("after argmax seg_pred min: ", seg_pred.min())
+        # print("after argmax seg_pred max: ", seg_pred.max())
 
         # Prepare individual head logits (no argmax/threshold here)
         semantic_logits = None
