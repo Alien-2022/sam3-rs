@@ -9,7 +9,11 @@ dataset:
   # read by the dataloader to know the class list and num_classes
   cls_file: cls_loveda.txt
   ignore_index: 255
-  reduce_zero_label: false
+  # by default, LoveDA masks use 0 for no-data value, and the segmentor's output like :
+  # [background:0, building:1, road:2, water:3, barren:4, forest:5, agriculture:6]
+  # so we first  set reduce_zero_label to true to shift gt labels by -1, making segmentor output and gt aligned.
+  # then map no-data 0 to ignore_index 255 in eval, so that no-data pixels are ignored in metrics calculation.
+  reduce_zero_label: true
   # Optional: use workspace NAS registry instead of local data_root
   # When provided, will call workspace.scripts.get_data.get_data_path(data_key)
   data_key: LoveDA
@@ -20,8 +24,10 @@ segmentor:
   bpe_path: bpe_simple_vocab_16e6.txt.gz
   # read by the model to build text prompts and map outputs.
   prompts_file: cls_loveda.txt
+  # confidence threshhold used to filter 200 queries output by decoder.
   confidence_threshold: 0.5
-  prob_threshold: 0.0
+  # used to seperate background from foreground in final mask output.
+  prob_threshold: 0.1
   bg_idx: 0
   prompt_includes_bg: true
   # Optional: use workspace NAS registry for checkpoint

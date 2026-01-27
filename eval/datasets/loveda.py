@@ -42,6 +42,18 @@ def _collect_files(root: Path, specs: Union[str, Path]) -> List[Path]:
 
 
 def _index_by_stem(paths: Iterable[Path]):
+    """
+    :param paths: 
+        [
+            WindowsPath('D:/data/LoveDA/Val/Rural/images_png/2617.png'),
+            WindowsPath('D:/data/LoveDA/Val/Rural/images_png/2618.png')
+        ]
+    :return:
+        {
+            '2617': WindowsPath('D:/data/LoveDA/Val/Rural/images_png/2617.png'),
+            '2618': WindowsPath('D:/data/LoveDA/Val/Rural/images_png/2618.png')
+        }
+    """
     return {p.stem: p for p in paths}
 
 
@@ -76,6 +88,9 @@ class LoveDADataset(Dataset):
             raise ValueError("No overlapping image/mask pairs found.")
 
         self.pairs = [(img_map[k], mask_map[k]) for k in common_keys]
+        # fallback class names if cls_file is not provided
+        # In the constructor of LoveDADataset, users can pass in a text file path through cls_file 
+        # or a string list directly through class_names.
         self.classes = _load_class_names(cls_file, fallback=class_names)
         self.num_classes = len(self.classes)
 

@@ -45,7 +45,6 @@ def save_prediction_mask(seg_pred, output_path):
     """
     mask = seg_pred.astype(np.uint8)
     # Debug: show ID distribution to verify non-zero presence
-    unique_vals = np.unique(mask)
     pred_img = Image.fromarray(mask, mode="L")
     pred_img.save(output_path)
     print(f"  Saved: {os.path.basename(output_path)}")
@@ -164,7 +163,7 @@ def save_results_from_single_inference(image, result, base_name, colors=COLORS, 
     dual_pred = result.seg_pred.cpu().numpy()
     base_path = f"{base_name}_dual_head"
     print(f"  Saving dual_head results...")
-    # save_prediction_mask(dual_pred, f"{base_path}_pred.png")
+    save_prediction_mask(dual_pred, f"{base_path}_pred.png")
     save_colored_mask(dual_pred, colors, f"{base_path}_color.png")
     save_overlay(image, dual_pred, colors, f"{base_path}_overlay.png")
 
@@ -217,12 +216,12 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
     # Model paths
-    checkpoint_path = get_weight_path("sam3") + "/sam3.pt"
+    checkpoint_path = get_weight_path("sam3")
     bpe_path = os.path.join(script_dir, "sam3", "assets", "bpe_simple_vocab_16e6.txt.gz")
 
     # Test image path
     dataset_path = get_data_path("LoveDA")
-    test_image_path = os.path.join(dataset_path, "Val/Urban/images_png/4168.png")
+    test_image_path = os.path.join(dataset_path, "Val/Rural/images_png/2522.png")
 
     # Prompts file for multi-class segmentation
     # prompts_file = os.path.join(script_dir, "configs/loveda_classes.txt")

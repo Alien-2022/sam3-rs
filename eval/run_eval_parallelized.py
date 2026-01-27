@@ -6,10 +6,9 @@ import argparse
 import json
 import os
 import sys
-import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Union, List
-import numpy as np
+
 import torch
 from PIL import Image
 from torch.utils.data import DataLoader
@@ -143,12 +142,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--prob-threshold", type=float, default=None, help="Override prob_threshold"
     )
-    parser.add_argument(
-        "--use-batch", action="store_true", default=True, help="Use high-speed batch inference"
-    )
-    parser.add_argument(
-        "--no-batch", action="store_false", dest="use_batch", help="Use serial predict_single inference"
-    )
     return parser.parse_args()
 
 
@@ -197,33 +190,36 @@ def main() -> None:
     total_imgs = len(loader.dataset)
     processed = 0
     for batch in loader:
+        # Paths is a tuple of strings (size=batch_size)
         paths = batch["image_path"]
-        masks = batch["mask"]
-        
-        # Select inference mode
-        if args.use_batch:
-            # High-speed batch inference (B > 1)
-            results = segmentor.predict_batch(paths, detailed=False)
-        else:
-            # Standard serial inference (one by one)
-            results = [segmentor.predict_single(p, detailed=False) for p in paths]
-        
-        for result, gt_mask in zip(results, masks):
-            pred = result.seg_pred
-            img_path = result.image_path
-            
-            pred_np = pred.cpu().numpy().astype(np.uint8)
-            gt_np = gt_mask.numpy().astype(np.uint8)
+        masks = batch["mask"] # Tensor [B, H, W]
 
+        # Use TRUE BATCH inference!
+        # predict_batch handles image loading, batch encoder, and batch decoder
+        batch_results = segmentor.predict_batch(list(paths), save_dir=None, detailed=False)
+
+        for i, result in enumerate(batch_results):
+            # Paths and order guaranteed to match
+            # result = batch_results[i]
+            # gt_mask = masks[i]
+            
+            gt_mask = masks[i]
+            pred = result.seg_pred
+            pred_np = pred.cpu().numpy().astype(int)
+            gt_np = gt_mask.numpy().astype(int)
+
+            # Debug: check value ranges
+            # if (pred_np.max() >= dataset.num_classes) or (pred_np.min() < 0):
+            #     print(
+            #         f"[WARN] pred out of range in {result.image_path}: min={pred_np.min()} max={pred_np.max()} num_classes={dataset.num_classes}"
+            #     )
+            
             metric.update(pred_np, gt_np)
             if save_pred_dir is not None:
-                save_prediction(pred, save_pred_dir, img_path)
+                save_prediction(pred, save_pred_dir, result.image_path)
 
-            processed += 1
-            print(f"[eval] {processed}/{total_imgs} images done", end="\r")
-
-        if processed >= 100:
-            break
+        processed += len(paths)
+        print(f"[eval] {processed}/{total_imgs} images done", end="\r")
 
     # Ensure the final progress line ends with newline
     if total_imgs > 0:
@@ -239,12 +235,6 @@ def main() -> None:
     print(json.dumps(scores_with_detail, indent=2))
 
     if metrics_json is not None:
-        scores_with_detail["prob_threshold"] = cfg["segmentor"].get("prob_threshold", 0.1)
-        scores_with_detail["confidence_threshold"] = cfg["segmentor"].get(
-            "confidence_threshold", 0.5
-        )
-        # Create directory if it doesn't exist
-        cur_time=time.strftime("%m-%d_%H%M", time.localtime())
         os.makedirs(os.path.dirname(metrics_json), exist_ok=True)
         with open(metrics_json, "w", encoding="utf-8") as f:
             json.dump(scores_with_detail, f, indent=2)

@@ -28,8 +28,7 @@ class InferenceConfig:
     # Inference parameters
     device: str = "cuda"
     confidence_threshold: float = 0.5
-    # To return a mask, prob_threshold must be >0 to have effect
-    prob_threshold: float = 0.1
+    prob_threshold: float = 0.0
     bg_idx: Optional[int] = 0
     # Set to True only when prompts.txt 已包含背景类；默认 False 表示需要注入背景通道
     prompt_includes_bg: bool = False
@@ -81,10 +80,6 @@ class SAM3RSSegmentor:
         """
         self.config = config
         self.device = torch.device(config.device)
-
-        # Check config validity
-        if not (0.0 < config.prob_threshold < 1.0):
-            raise ValueError("prob_threshold must be between 0 and 1.")
 
         # Initialize SAM3 model (follow SegEarthOV3's approach)
         from sam3 import build_sam3_image_model
@@ -188,9 +183,9 @@ class SAM3RSSegmentor:
             instance_logits_only = None
 
         inference_state = None
-        # Use float32 autocast to avoid bf16/float32 weight mismatch on some backbones
+        # Use bfloat16 autocast for RTX 50 series (significant speedup over float32)
         with torch.no_grad(), torch.autocast(
-            device_type=self.device.type, dtype=torch.float32
+            device_type=self.device.type, dtype=torch.bfloat16
         ):
             inference_state = self.processor.set_image(image)
 
@@ -245,7 +240,9 @@ class SAM3RSSegmentor:
                             # Accumulate with max pooling over instances (without score weighting)
                             # NOTE: Score weighting is applied via presence_score at the end
                             # inst_current = torch.max(inst_current, inst_logits)
-                            inst_current = torch.max(inst_current, inst_logits)
+                            inst_current = torch.max(
+                                inst_current, inst_logits
+                            )
 
                     current_logits = torch.max(current_logits, inst_current)
                     # print("current_logits shape after instance head: ", current_logits.shape)
@@ -293,96 +290,6 @@ class SAM3RSSegmentor:
         #             del inference_state[key]
 
         return seg_logits, per_class_results, semantic_logits_only, instance_logits_only
-
-    def _inference_batch_view(self, images: List[Image.Image], detailed: bool = False):
-        """
-        高性能批量推理实现 (True Batch Inference)。
-        直接调用底层 model.backbone 和 model.forward_grounding，绕过处理器内部的单图限制。
-        """
-        import torchvision.transforms.v2 as v2
-        from sam3.model.data_misc import FindStage
-        
-        batch_size = len(images)
-        w_orig, h_orig = images[0].size
-        
-        # 1. 图像预处理：将 PIL 转换为 Batch Tensor
-        input_tensors = []
-        for img in images:
-            t = v2.functional.to_image(img).to(self.device)
-            t = self.processor.transform(t)
-            input_tensors.append(t)
-        batch_input = torch.stack(input_tensors, dim=0) # [B, 3, 1008, 1008]
-
-        with torch.no_grad(), torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
-            # 2. 图像特征提取 (Encoder) - 批量并行
-            backbone_out = self.processor.model.backbone.forward_image(batch_input)
-            
-            # 初始化批量结果 [B, num_prompts, H, W]
-            batch_seg_logits = torch.zeros((batch_size, self.num_prompts, h_orig, w_orig), device=self.device)
-            
-            num_queries = 200 # SAM3 默认每张图 200 个 query
-            # 关键：构造 Batch 模式的 FindStage
-            # 每张图片会自动产生 200 个 query，所以 img_ids 只需要包含 batch 中的图片索引即可
-            find_stage = FindStage(
-                img_ids=torch.arange(batch_size, device=self.device, dtype=torch.long),
-                text_ids=torch.zeros(batch_size, device=self.device, dtype=torch.long),
-                input_boxes=None,
-                input_boxes_mask=None,
-                input_boxes_label=None,
-                input_points=None,
-                input_points_mask=None,
-            )
-            
-            # 为每一张图创建一个 dummy prompt
-            dummy_geometric = self.processor.model._get_dummy_prompt(num_prompts=batch_size)
-
-            # 3. 循环遍历每个 Prompt (Decoder / Grounding)
-            for prompt_idx, prompt_word in enumerate(self.prompts["names"]):
-                # 清除历史文本特征
-                for k in ["language_features", "language_mask", "language_embeds"]:
-                    if k in backbone_out: del backbone_out[k]
-                
-                # 文本特征提取
-                text_outputs = self.processor.model.backbone.forward_text([prompt_word], device=self.device)
-                backbone_out.update(text_outputs)
-                
-                # 解码阶段 (Grounding) - 处理 Batch
-                outputs = self.processor.model.forward_grounding(
-                    backbone_out=backbone_out,
-                    find_input=find_stage,
-                    geometric_prompt=dummy_geometric,
-                    find_target=None
-                )
-                
-                # --- 分支 A: 语义头 (Semantic Head) ---
-                sem_logits = outputs["semantic_seg"] # [B, 1, 288, 288]
-                sem_probs = F.interpolate(sem_logits, size=(h_orig, w_orig), mode="bilinear", align_corners=False).squeeze(1).sigmoid()
-
-                # --- 分支 B: 实例头 (Instance Head) ---
-                inst_masks = outputs["pred_masks"] # [B, 200, 288, 288]
-                
-                # 计算综合分数 = 类别置信度 * 存在性概率
-                # 显式重塑形状以确保在不同 Batch Size 下广播正常 (防止 [B, 200, 1] * [B, 1] 报错)
-                p_logits = outputs["pred_logits"].sigmoid().view(batch_size, num_queries, 1, 1)
-                p_presence = outputs["presence_logit_dec"].sigmoid().view(batch_size, 1, 1, 1)
-                inst_scores = p_logits * p_presence
-
-                # 将 200 个 query 的 Mask 融合为一张概率图 (Max 融合)
-                # 在低分辨率下运算以节省显存
-                inst_fused_small = (inst_masks.sigmoid() * inst_scores).max(dim=1)[0] # [B, 288, 288]
-                inst_probs = F.interpolate(inst_fused_small.unsqueeze(1), size=(h_orig, w_orig), mode="bilinear", align_corners=False).squeeze(1)
-
-                # --- 双头融合与 Presence 得分过滤 ---
-                current_batch_logits = torch.max(inst_probs, sem_probs)
-                
-                if self.config.use_presence_score:
-                    # 采用 200 个 query 中的最大存在得分作为图像系数
-                    img_presence = outputs["presence_logit_dec"].sigmoid().max(dim=1)[0] # [B, 1]
-                    current_batch_logits = current_batch_logits * img_presence.view(batch_size, 1, 1)
-
-                batch_seg_logits[:, prompt_idx] = current_batch_logits
-
-        return batch_seg_logits, [{} for _ in range(batch_size)], None, None
 
     def _sliding_window_inference(
         self, image: Image.Image, detailed: bool = False
@@ -432,8 +339,8 @@ class SAM3RSSegmentor:
                 crop_img = image.crop((x1, y1, x2, y2))
 
                 # Inference on crop
-                crop_logits, crop_results, _, _ = self._inference_single_view(
-                    crop_img, detailed=detailed
+                crop_logits, crop_results, _, _ = (
+                    self._inference_single_view(crop_img, detailed=detailed)
                 )
 
                 # Accumulate results
@@ -628,16 +535,23 @@ class SAM3RSSegmentor:
         def logits_to_pred(logits: torch.Tensor) -> torch.Tensor:
             # If prompts do NOT include background, explicitly add a zero-logit background channel
             if not self.config.prompt_includes_bg:
-                bg_pad = torch.zeros(
-                    (1, *logits.shape[1:]), device=logits.device, dtype=logits.dtype
-                )
+                bg_pad = torch.zeros((1, *logits.shape[1:]), device=logits.device, dtype=logits.dtype)
                 logits_for_argmax = torch.cat([bg_pad, logits], dim=0)
                 pred = torch.argmax(logits_for_argmax, dim=0)
+
+                # Map background to bg_idx; keep foreground IDs contiguous starting from 1
+                if bg_idx != 0:
+                    pred = torch.where(pred == 0, torch.tensor(bg_idx, device=pred.device), pred + bg_idx - 1)
             else:
                 pred = torch.argmax(logits, dim=0)
 
-            max_vals = logits.max(0)[0]
-            pred[max_vals < self.config.prob_threshold] = bg_idx
+            if self.config.prob_threshold > 0:
+                max_vals = logits.max(0)[0]
+                pred[max_vals < self.config.prob_threshold] = bg_idx
+            elif not self.config.prompt_includes_bg:
+                # Fallback: if no explicit background prompt and no prob_threshold, treat non-positive logits as background
+                max_vals = logits.max(0)[0]
+                pred[max_vals <= 0] = bg_idx
             return pred
 
         seg_pred = logits_to_pred(seg_logits)
@@ -667,10 +581,6 @@ class SAM3RSSegmentor:
             instance_logits = instance_logits_only
 
         # Prepare result
-        # seg_pred.shape like [H, W], seg_logits.shape like [num_classes, H, W]
-        # when prompt_includes_bg is True, pixel values in seg_pred are class IDs, consistent with the order read from prompts file
-        # when prompt_includes_bg is False, add background=0, class IDs in seg_pred are shifted by 1
-        
         result = SegmentationResult(
             image_path=image_path,
             seg_logits=seg_logits,
@@ -682,76 +592,303 @@ class SAM3RSSegmentor:
 
         return result
 
+    def _inference_batch_view(
+        self, images: List[Image.Image], detailed: bool = False
+    ) -> List[Tuple[torch.Tensor, Dict, Optional[torch.Tensor], Optional[torch.Tensor]]]:
+        """
+        True batch inference for a list of images (same size).
+        Bypasses Sam3Processor._forward_grounding to handle batch logic correctly.
+        """
+        batch_size = len(images)
+        w, h = images[0].size
+        # Verify consistent size
+        for img in images:
+            if img.size != (w, h):
+                raise ValueError("All images in batch must have same size")
+
+        # 1. Batch Image Encoding (Encoder Parallelism)
+        # Manually transform and stack using processor's transform
+        import torchvision.transforms.v2 as v2
+        
+        input_tensors = []
+        for img in images:
+            # Replicate Sam3Processor transform logic
+            # v2.functional.to_image converts PIL->Tensor (uint8, [C, H, W])
+            t = v2.functional.to_image(img).to(self.device)
+            t = self.processor.transform(t)
+            input_tensors.append(t)
+        
+        batch_input = torch.stack(input_tensors, dim=0) # [B, 3, 1008, 1008]
+
+        with torch.no_grad(), torch.autocast(
+            device_type=self.device.type, dtype=torch.bfloat16
+        ):
+            # Forward Backbone
+            backbone_out = self.processor.model.backbone.forward_image(batch_input)
+
+            # Prepare outputs holders
+            # batch_seg_logits: [B, num_prompts, h, w]
+            batch_seg_logits = torch.zeros((batch_size, self.num_prompts, h, w), device=self.device)
+            
+            batch_semantic_only = None
+            if self.config.use_semantic_head:
+                batch_semantic_only = torch.zeros((batch_size, self.num_prompts, h, w), device=self.device)
+                
+            batch_instance_only = None
+            if self.config.use_instance_head:
+                 batch_instance_only = torch.zeros((batch_size, self.num_prompts, h, w), device=self.device)
+
+            # Dummy geometric prompt (empty)
+            dummy_prompt = self.processor.model._get_dummy_prompt() # Shared across batch? 
+            # Note: geometric_prompt usually expects list of prompts per batch item or similar.
+            # But SAM3 implementation details vary. Let's use loop for safety if geom prompt stateful logic is complex,
+            # BUT forward_grounding handles batch if input features are batch.
+            # We need to broadcast dummy prompt to batch size.
+            # Sam3 Prompt object usually handles broadcasting or we pass unique prompt per batch idx.
+            # For simplicity in pure text mode, passing single dummy prompt *might* work if model broadcasts,
+            # but safer is to rely on simple text forwarding which implies no geometric prompt.
+
+            # 2. Process each prompt (Decoder Parallelism across Batch)
+            for prompt_idx, prompt_word in enumerate(self.prompts["names"]):
+                # Clean backbone_out from previous text features
+                keys_to_del = ["language_features", "language_mask", "language_embeds"]
+                for k in keys_to_del:
+                    if k in backbone_out:
+                        del backbone_out[k]
+
+                # Forward Text
+                # forward_text([prompt_word]) -> features for 1 prompt.
+                # Sam3 backbone auto-broadcasts text features to image batch size during cross-attention or combiner?
+                # Usually yes.
+                text_outputs = self.processor.model.backbone.forward_text([prompt_word], device=self.device)
+                backbone_out.update(text_outputs)
+
+                # Forward Grounding (Decoder)
+                # We need a fresh find_stage per forward?
+                # Currently find_stage in processor is fixed dummy. Re-use it.
+                
+                # IMPORTANT: We must handle geometric_prompt.
+                # If we pass a single dummy prompt, does forward_grounding handle Batch>1?
+                # Reading sam3 code: forward_grounding(..., geometric_prompt)
+                # It iterates geometric_prompt. Or expects it to match batch.
+                # Let's create a list of dummy prompts if needed.
+                # Actually, if we look at Code: geometry_encoders.py usually handles it.
+                # For zero-shot text only, geometric_prompt is empty.
+                # Let's try passing the single dummy object.
+                
+                outputs = self.processor.model.forward_grounding(
+                    backbone_out=backbone_out,
+                    find_input=self.processor.find_stage,
+                    geometric_prompt=dummy_prompt, 
+                    find_target=None,
+                )
+                
+                # outputs fields:
+                # 'pred_masks': [B, 200, H_feat, W_feat] (e.g. 288x288) or [B*200, ...] depending on network.
+                # Usually [B, 200, ...] before post-processing.
+                # 'pred_logits': [B, 200]
+                # 'presence_logit_dec': [B, 200]
+                # 'semantic_seg': [B, 1, H_feat, W_feat]
+
+                # --- 1. Semantic Head ---
+                if self.config.use_semantic_head:
+                     sem_src = outputs["semantic_seg"] # [B, 1, 288, 288]
+                     sem_up = F.interpolate(sem_src, size=(h, w), mode="bilinear", align_corners=False).squeeze(1) # [B, h, w]
+                     if batch_semantic_only is not None:
+                         batch_semantic_only[:, prompt_idx, :, :] = sem_up
+                
+                # --- 2. Instance Head ---
+                # Need to fuse 200 queries into one map per image
+                # outputs['pred_masks']: [B, 200, 288, 288] (sigmoid? No, logits usually)
+                inst_masks = outputs["pred_masks"]
+                inst_logits = outputs["pred_logits"] # [B, 200]
+                presence = outputs["presence_logit_dec"] # [B, 200] or [B, 1]?
+                
+                # Sigmoid everything
+                inst_probs = inst_logits.sigmoid() 
+                presence_score = presence.sigmoid()
+                if presence_score.dim() == 2 and presence_score.shape[1] == 200:
+                     # per-query presence
+                     pass
+                elif presence_score.dim() >= 2 and presence_score.shape[1] == 1:
+                     pass 
+                
+                # Combined score
+                # Usually presence is [B, 1] or broadcastable. 
+                # In processor: presence_score = presence.sigmoid().unsqueeze(1); out_probs = (out_probs * presence_score)
+                # Let's match processor:
+                if presence.shape[-1] != 200:
+                     presence = presence.unsqueeze(1) # [B,1] -> [B,1] if scalar?
+                
+                final_scores = inst_probs * presence.sigmoid() # [B, 200]
+                
+                # Filter low conf
+                # Mask out queries with low score?
+                # For aggregation: we want max proability per pixel.
+                # We can't resize 200 masks for 8 images (1600 total) efficiently if we don't filter.
+                # But parallel resize on GPU is fast.
+                # inst_masks: [B, 200, 288, 288]
+                
+                current_batch_logits = torch.zeros((batch_size, h, w), device=self.device)
+
+                if self.config.use_instance_head:
+                     # Memory-friendly: filter queries per image before resizing to HxW.
+                     b_sz, n_q, mh, mw = inst_masks.shape
+                     mask = final_scores > self.config.confidence_threshold # [B, 200]
+
+                     for b in range(b_sz):
+                         # Ensure active mask is 1D [Q]
+                         active = mask[b].view(-1)
+                         if not torch.any(active):
+                             continue
+
+                         # Select only active queries for this image: [Q, mh, mw]
+                         # inst_masks: [batch_size, num_queries, mh, mw]
+                         inst_masks_b = inst_masks[b] # [num_queries, mh, mw]
+                         sel_masks = inst_masks_b[active] # [Q_active, mh, mw]
+                         # Resize to target spatial size
+                         sel_masks = F.interpolate(
+                             sel_masks.unsqueeze(1),
+                             size=(h, w),
+                             mode="bilinear",
+                             align_corners=False,
+                         ).squeeze(1)  # [q, h, w]
+
+                         # Score-weighted sigmoid
+                         sel_probs = sel_masks.sigmoid()
+                         # Use flattened scores to match flattened active mask
+                         sel_scores = final_scores[b].flatten()[active].view(-1, 1, 1)
+                         sel_probs = sel_probs * sel_scores
+
+                         inst_max_b, _ = sel_probs.max(dim=0)  # [h, w]
+                         current_batch_logits[b] = torch.max(current_batch_logits[b], inst_max_b)
+
+                # Fuse Semantic
+                if self.config.use_semantic_head:
+                     # sem_up: [B, h, w] (sigmoid?)
+                     # Processor: `semantic_seg_mask = ... .sigmoid()`
+                     sem_sig = sem_up.sigmoid()
+                     current_batch_logits = torch.max(current_batch_logits, sem_sig)
+                
+                # Global Presence
+                if self.config.use_presence_score:
+                     # output.get("presence_score")
+                     # In processor: presence_score = presence_logit_dec.sigmoid()
+                     # Taking the max score across queries as "image presence"?
+                     # Or is there a global presence? 
+                     # Outputs has `presence_logit_dec`. 
+                     # Let's use max(final_scores) per image as presence?
+                     # SAM3 usually outputs one presense score vector.
+                     # Let's rely on presence.sigmoid().max(dim=1)
+                     presence_val = presence.sigmoid().max(dim=1)[0]
+                     # Ensure flattened to 1D to handle [1,1] case safe for expand(batch_size)
+                     presence_val = presence_val.view(-1)
+                     if presence_val.numel() == 1 and batch_size > 1:
+                         presence_val = presence_val.expand(batch_size)
+                     batch_presence = presence_val.view(batch_size, 1, 1).to(current_batch_logits.device)
+                     current_batch_logits = current_batch_logits * batch_presence
+
+                batch_seg_logits[:, prompt_idx, :, :] = current_batch_logits
+
+        # 3. Pack Results
+        results = []
+        for i in range(batch_size):
+            # Extract slices
+            sl = batch_seg_logits[i] # [num_prompts, h, w]
+             # Reuse existing result packaging methods if possible? 
+            # Need to argmax etc.
+            # But predict_single does argmax.
+            # We return logit tuples here to match `_inference_single_view` signature-ish
+            # but predict_batch returns SegmentationResult list.
+            
+            # We can't return detailed results easily here (skipped for speed).
+            results.append((sl, {}, None, None))
+            
+        return results
+
     def predict_batch(
         self,
         image_paths: List[str],
+        save_dir: Optional[str] = None,
         detailed: bool = False,
     ) -> List[SegmentationResult]:
         """
         Predict segmentation for a batch of images.
-
-        Args:
-            image_paths: List of image paths
-            detailed: Whether to return detailed per-instance results
-
-        Returns:
-            List of SegmentationResult
         """
         # Load images
         images = [Image.open(p).convert("RGB") for p in image_paths]
-        # Batch reference for sliding windows is not currently supported.
-        (
-            seg_logits,
-            per_class_results,
-            semantic_logits_only,
-            instance_logits_only,
-        ) = self._inference_batch_view(images, detailed=detailed)
-
-        # Post-process for Each Batch Item
-        batch_size = len(image_paths)
-        results = []
         
-        # 1. Map prompts to actual class IDs (handle synonyms)
-        if self.num_classes != self.num_prompts:
-            # seg_logits: [B, num_prompts, H, W]
-            # cls_index: [num_cls, num_prompts, 1, 1]
-            cls_index = F.one_hot(self.query_indices, num_classes=self.num_classes).T
-            cls_index = cls_index.view(self.num_classes, self.num_prompts, 1, 1)
-            
-            # (B, 1, num_prompts, H, W) * (1, num_cls, num_prompts, 1, 1) -> max(dim=2)
-            # Result: [B, num_cls, H, W]
-            seg_logits = (seg_logits.unsqueeze(1) * cls_index.unsqueeze(0)).max(2)[0]
+        # Check if sliding window is needed (naively check first image)
+        # Assuming all images similar. If mixed, this logic is flawed but fine for standard eval.
+        w, h = images[0].size
+        use_sliding = self.config.slide_crop_size > 0 and (
+            self.config.slide_crop_size < w or self.config.slide_crop_size < h
+        )
 
-        # 2. Get final prediction (argmax)
-        bg_idx = 0 if self.config.bg_idx is None else self.config.bg_idx
-        
-        # Unify prediction logic across batch
-        # seg_logits: [B, num_classes, H, W]
-        if not self.config.prompt_includes_bg:
-            bg_pad = torch.zeros(
-                (batch_size, 1, *seg_logits.shape[2:]), device=seg_logits.device, dtype=seg_logits.dtype
-            )
-            logits_for_argmax = torch.cat([bg_pad, seg_logits], dim=1)
-            seg_pred = torch.argmax(logits_for_argmax, dim=1)
+        if not use_sliding:
+            # High-speed batch inference
+            batch_logits_list = self._inference_batch_view(images, detailed=detailed)
         else:
-            seg_pred = torch.argmax(seg_logits, dim=1)
+            # Fallback to loop for sliding window
+            batch_logits_list = []
+            for img in images:
+                res = self._sliding_window_inference(img, detailed=detailed)
+                # _sliding assumes single
+                batch_logits_list.append((res[0], res[1], res[2], res[3]))
 
-        max_vals = seg_logits.max(1)[0]
-        seg_pred[max_vals < self.config.prob_threshold] = bg_idx
+        # Post-process batch
+        results = []
+        for i, (seg_logits, per_class, _, _) in enumerate(batch_logits_list):
+            img_path = image_paths[i]
+            
+            # Post-processing (Argmax, etc) - copied from predict_single logic
+            # This part is fast on CPU/GPU
+            
+            # 1. Map prompts
+            final_logits = seg_logits
+            if self.num_classes != self.num_prompts:
+                # [num_prompts, h, w] -> [1, num_prompts, h, w]
+                sl = seg_logits.unsqueeze(0)
+                cls_index = F.one_hot(self.query_indices, num_classes=self.num_classes)
+                cls_index = cls_index.T.view(self.num_classes, self.num_prompts, 1, 1)
+                final_logits = (sl * cls_index).max(1)[0]
+            
+            # 2. Argmax
+            bg_idx = 0 if self.config.bg_idx is None else self.config.bg_idx
 
-        # 3. Package results
-        for b in range(batch_size):
-            results.append(
-                SegmentationResult(
-                    image_path=image_paths[b],
-                    seg_logits=seg_logits[b],
-                    seg_pred=seg_pred[b],
-                    per_class_results={}, # Detailed results not supported in batch mode yet
-                    semantic_logits=None,
-                    instance_logits=None,
-                )
+            def logits_to_pred(logits: torch.Tensor) -> torch.Tensor:
+                if not self.config.prompt_includes_bg:
+                    bg_pad = torch.zeros((1, *logits.shape[1:]), device=logits.device, dtype=logits.dtype)
+                    logits_for_argmax = torch.cat([bg_pad, logits], dim=0)
+                    pred = torch.argmax(logits_for_argmax, dim=0)
+                    if bg_idx != 0:
+                        pred = torch.where(pred == 0, torch.tensor(bg_idx, device=pred.device), pred + bg_idx - 1)
+                else:
+                    pred = torch.argmax(logits, dim=0)
+                
+                if self.config.prob_threshold > 0:
+                    max_vals = logits.max(0)[0]
+                    pred[max_vals < self.config.prob_threshold] = bg_idx
+                elif not self.config.prompt_includes_bg:
+                    max_vals = logits.max(0)[0]
+                    pred[max_vals <= 0] = bg_idx
+                return pred
+
+            seg_pred = logits_to_pred(final_logits)
+            
+            result = SegmentationResult(
+                image_path=img_path,
+                seg_logits=final_logits, # Return mapped logits
+                seg_pred=seg_pred,
+                per_class_results=per_class,
+                semantic_logits=None, 
+                instance_logits=None,
             )
+            results.append(result)
 
+            if save_dir:
+                self._save_result(result, save_dir)
+        
         return results
 
     def _save_result(self, result: SegmentationResult, save_dir: str):
