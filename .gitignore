@@ -154,3 +154,8 @@ Thumbs.db
 
 # pred and output files
 outputs/preds/
+
+# dataset
+data/*
+
+weights/

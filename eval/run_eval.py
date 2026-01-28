@@ -83,8 +83,8 @@ def load_config(cfg_path: str) -> Dict[str, Any]:
             pass
     else:
         data_root = dataset.get("data_root", ".")
-        data_root = EVAL_DIR / data_root
-        dataset["data_root"] = EVAL_DIR / data_root
+        data_root = SAM3_RS_DIR / data_root
+        dataset["data_root"] = data_root
         dataset["img_dir"] = data_root / dataset["img_dir"]
         dataset["mask_dir"] = data_root / dataset["mask_dir"]
     dataset["cls_file"] = EVAL_DIR / "datasets" / dataset["cls_file"]
@@ -98,6 +98,8 @@ def load_config(cfg_path: str) -> Dict[str, Any]:
             segmentor["checkpoint_path"] = weight_path
         except Exception:
             pass
+    else:
+        segmentor["checkpoint_path"] = SAM3_RS_DIR / segmentor["checkpoint_path"]
     segmentor["bpe_path"] = SAM3_RS_DIR / "sam3/assets" / segmentor["bpe_path"]
     # Use dataset class list as prompts file
     segmentor["prompts_file"] = dataset["cls_file"]
@@ -159,7 +161,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     cfg = load_config(args.config)
-
+    print(cfg)
     if args.save_pred is not None:
         cfg.setdefault("output", {})["save_pred_dir"] = args.save_pred
     if args.device is not None:
@@ -275,7 +277,7 @@ def main() -> None:
             "confidence_threshold", 0.5
         )
         # Create directory if it doesn't exist
-        cur_time=time.strftime("%m%d_%H%M", time.localtime())
+        # cur_time=time.strftime("%m%d_%H%M", time.localtime())
         os.makedirs(os.path.dirname(metrics_json), exist_ok=True)
         with open(metrics_json, "w", encoding="utf-8") as f:
             json.dump(scores_with_detail, f, indent=2)

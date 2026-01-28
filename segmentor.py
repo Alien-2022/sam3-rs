@@ -400,7 +400,7 @@ class SAM3RSSegmentor:
                 scores = out_probs
                 masks_logits = out_masks
                 semantic_seg = out_semantic_masks
-                # check th shape
+                # check the shape
                 print(f"scores shape: {scores.shape}")
                 print(f"masks_logits shape: {masks_logits.shape}")
                 print(f"semantic_seg shape: {semantic_seg.shape}")
