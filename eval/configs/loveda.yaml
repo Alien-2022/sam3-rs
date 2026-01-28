@@ -25,9 +25,10 @@ segmentor:
   # read by the model to build text prompts and map outputs.
   prompts_file: cls_loveda.txt
   # confidence threshhold used to filter 200 queries output by decoder.
-  confidence_threshold: 0.5
+  confidence_threshold: 0.1
   # used to seperate background from foreground in final mask output.
-  prob_threshold: 0.1
+  prob_threshold: 0.5
+  use_presence_score: false
   bg_idx: 0
   prompt_includes_bg: true
   # Optional: use workspace NAS registry for checkpoint

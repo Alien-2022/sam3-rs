@@ -249,7 +249,7 @@ def main():
         slide_crop_size=0,        # No sliding window for small images
         slide_stride=1024,
         prompts_file=prompts_file,
-        prompt_includes_bg=False
+        prompt_includes_bg=True
     )
 
     segmentor = SAM3RSSegmentor(config)

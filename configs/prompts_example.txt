@@ -1,2 +1,7 @@
+background
 building
 road
+water
+barren
+forest
+agriculture

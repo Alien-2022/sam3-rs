@@ -37,7 +37,7 @@ class InferenceConfig:
     # Head selection (SegEarthOV3 innovation)
     use_semantic_head: bool = True
     use_instance_head: bool = True
-    use_presence_score: bool = True
+    use_presence_score: bool = False
 
     # Large image handling
     slide_crop_size: int = 0  # 0 means no sliding
@@ -301,26 +301,31 @@ class SAM3RSSegmentor:
         """
         import torchvision.transforms.v2 as v2
         from sam3.model.data_misc import FindStage
-        
+
         batch_size = len(images)
         w_orig, h_orig = images[0].size
-        
+
         # 1. 图像预处理：将 PIL 转换为 Batch Tensor
+        # 图像预处理和特征提取相当于 processor.set_image 的前半部分
         input_tensors = []
         for img in images:
             t = v2.functional.to_image(img).to(self.device)
             t = self.processor.transform(t)
             input_tensors.append(t)
-        batch_input = torch.stack(input_tensors, dim=0) # [B, 3, 1008, 1008]
+        batch_input = torch.stack(input_tensors, dim=0)  # [B, 3, 1008, 1008]
 
-        with torch.no_grad(), torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+        with torch.no_grad(), torch.autocast(
+            device_type=self.device.type, dtype=torch.bfloat16
+        ):
             # 2. 图像特征提取 (Encoder) - 批量并行
             backbone_out = self.processor.model.backbone.forward_image(batch_input)
-            
+
             # 初始化批量结果 [B, num_prompts, H, W]
-            batch_seg_logits = torch.zeros((batch_size, self.num_prompts, h_orig, w_orig), device=self.device)
-            
-            num_queries = 200 # SAM3 默认每张图 200 个 query
+            batch_seg_logits = torch.zeros(
+                (batch_size, self.num_prompts, h_orig, w_orig), device=self.device
+            )
+
+            num_queries = 200  # SAM3 默认每张图 200 个 query
             # 关键：构造 Batch 模式的 FindStage
             # 每张图片会自动产生 200 个 query，所以 img_ids 只需要包含 batch 中的图片索引即可
             find_stage = FindStage(
@@ -332,53 +337,127 @@ class SAM3RSSegmentor:
                 input_points=None,
                 input_points_mask=None,
             )
-            
+
             # 为每一张图创建一个 dummy prompt
-            dummy_geometric = self.processor.model._get_dummy_prompt(num_prompts=batch_size)
+            dummy_geometric = self.processor.model._get_dummy_prompt(
+                num_prompts=batch_size
+            )
 
             # 3. 循环遍历每个 Prompt (Decoder / Grounding)
             for prompt_idx, prompt_word in enumerate(self.prompts["names"]):
                 # 清除历史文本特征
                 for k in ["language_features", "language_mask", "language_embeds"]:
-                    if k in backbone_out: del backbone_out[k]
-                
+                    if k in backbone_out:
+                        del backbone_out[k]
+
                 # 文本特征提取
-                text_outputs = self.processor.model.backbone.forward_text([prompt_word], device=self.device)
+                # 相当于 inference single 时的 set_text_prompt
+                text_outputs = self.processor.model.backbone.forward_text(
+                    [prompt_word], device=self.device
+                )
                 backbone_out.update(text_outputs)
-                
+
                 # 解码阶段 (Grounding) - 处理 Batch
+                # 模拟 sam3_image_processor.py中的_forward_grounding
                 outputs = self.processor.model.forward_grounding(
                     backbone_out=backbone_out,
                     find_input=find_stage,
                     geometric_prompt=dummy_geometric,
-                    find_target=None
+                    find_target=None,
                 )
-                
+
+                # pred_masks: [B, 200, 288, 288]
+                # semantic_seg: [B, 1, 288, 288]
+                # pred_logits: [B, 200, 1]
+                # presence_score: [B, 1, 1]
+                out_logits = outputs["pred_logits"]
+                out_masks = outputs["pred_masks"]
+                out_probs = out_logits.sigmoid()
+                presence_score = outputs["presence_logit_dec"].sigmoid().unsqueeze(1)
+                print(f"out_probs shape: {out_probs.shape}")
+                print(f"presence_score shape: {presence_score.shape}")
+
+                out_probs = (out_probs * presence_score).squeeze(-1)
+
+                keep = out_probs > self.config.confidence_threshold
+                out_probs = out_probs[keep]
+                out_masks = out_masks[keep]
+
+                out_masks = F.interpolate(
+                    out_masks.unsqueeze(1),
+                    (h_orig, w_orig),
+                    mode="bilinear",
+                    align_corners=False,
+                ).sigmoid()
+
+                out_semantic_masks = F.interpolate(
+                    outputs["semantic_seg"],
+                    (h_orig, w_orig),
+                    mode="bilinear",
+                    align_corners=False,
+                ).sigmoid()
+
+                scores = out_probs
+                masks_logits = out_masks
+                semantic_seg = out_semantic_masks
+                # check th shape
+                print(f"scores shape: {scores.shape}")
+                print(f"masks_logits shape: {masks_logits.shape}")
+                print(f"semantic_seg shape: {semantic_seg.shape}")
+                import sys
+
+                sys.exit(0)
+
                 # --- 分支 A: 语义头 (Semantic Head) ---
-                sem_logits = outputs["semantic_seg"] # [B, 1, 288, 288]
-                sem_probs = F.interpolate(sem_logits, size=(h_orig, w_orig), mode="bilinear", align_corners=False).squeeze(1).sigmoid()
+                sem_logits = outputs["semantic_seg"]  # [B, 1, 288, 288]
+                sem_probs = (
+                    F.interpolate(
+                        sem_logits,
+                        size=(h_orig, w_orig),
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+                    .squeeze(1)
+                    .sigmoid()
+                )
 
                 # --- 分支 B: 实例头 (Instance Head) ---
-                inst_masks = outputs["pred_masks"] # [B, 200, 288, 288]
-                
+                # pred_masks 就是
+                inst_masks = outputs["pred_masks"]  # [B, 200, 288, 288]
+
                 # 计算综合分数 = 类别置信度 * 存在性概率
                 # 显式重塑形状以确保在不同 Batch Size 下广播正常 (防止 [B, 200, 1] * [B, 1] 报错)
-                p_logits = outputs["pred_logits"].sigmoid().view(batch_size, num_queries, 1, 1)
-                p_presence = outputs["presence_logit_dec"].sigmoid().view(batch_size, 1, 1, 1)
+                p_logits = (
+                    outputs["pred_logits"].sigmoid().view(batch_size, num_queries, 1, 1)
+                )
+                p_presence = (
+                    outputs["presence_logit_dec"].sigmoid().view(batch_size, 1, 1, 1)
+                )
                 inst_scores = p_logits * p_presence
 
                 # 将 200 个 query 的 Mask 融合为一张概率图 (Max 融合)
                 # 在低分辨率下运算以节省显存
-                inst_fused_small = (inst_masks.sigmoid() * inst_scores).max(dim=1)[0] # [B, 288, 288]
-                inst_probs = F.interpolate(inst_fused_small.unsqueeze(1), size=(h_orig, w_orig), mode="bilinear", align_corners=False).squeeze(1)
+                inst_fused_small = (inst_masks.sigmoid() * inst_scores).max(dim=1)[
+                    0
+                ]  # [B, 288, 288]
+                inst_probs = F.interpolate(
+                    inst_fused_small.unsqueeze(1),
+                    size=(h_orig, w_orig),
+                    mode="bilinear",
+                    align_corners=False,
+                ).squeeze(1)
 
                 # --- 双头融合与 Presence 得分过滤 ---
                 current_batch_logits = torch.max(inst_probs, sem_probs)
-                
+
                 if self.config.use_presence_score:
                     # 采用 200 个 query 中的最大存在得分作为图像系数
-                    img_presence = outputs["presence_logit_dec"].sigmoid().max(dim=1)[0] # [B, 1]
-                    current_batch_logits = current_batch_logits * img_presence.view(batch_size, 1, 1)
+                    img_presence = (
+                        outputs["presence_logit_dec"].sigmoid().max(dim=1)[0]
+                    )  # [B, 1]
+                    current_batch_logits = current_batch_logits * img_presence.view(
+                        batch_size, 1, 1
+                    )
 
                 batch_seg_logits[:, prompt_idx] = current_batch_logits
 
@@ -670,7 +749,7 @@ class SAM3RSSegmentor:
         # seg_pred.shape like [H, W], seg_logits.shape like [num_classes, H, W]
         # when prompt_includes_bg is True, pixel values in seg_pred are class IDs, consistent with the order read from prompts file
         # when prompt_includes_bg is False, add background=0, class IDs in seg_pred are shifted by 1
-        
+
         result = SegmentationResult(
             image_path=image_path,
             seg_logits=seg_logits,
@@ -710,26 +789,28 @@ class SAM3RSSegmentor:
         # Post-process for Each Batch Item
         batch_size = len(image_paths)
         results = []
-        
+
         # 1. Map prompts to actual class IDs (handle synonyms)
         if self.num_classes != self.num_prompts:
             # seg_logits: [B, num_prompts, H, W]
             # cls_index: [num_cls, num_prompts, 1, 1]
             cls_index = F.one_hot(self.query_indices, num_classes=self.num_classes).T
             cls_index = cls_index.view(self.num_classes, self.num_prompts, 1, 1)
-            
+
             # (B, 1, num_prompts, H, W) * (1, num_cls, num_prompts, 1, 1) -> max(dim=2)
             # Result: [B, num_cls, H, W]
             seg_logits = (seg_logits.unsqueeze(1) * cls_index.unsqueeze(0)).max(2)[0]
 
         # 2. Get final prediction (argmax)
         bg_idx = 0 if self.config.bg_idx is None else self.config.bg_idx
-        
+
         # Unify prediction logic across batch
         # seg_logits: [B, num_classes, H, W]
         if not self.config.prompt_includes_bg:
             bg_pad = torch.zeros(
-                (batch_size, 1, *seg_logits.shape[2:]), device=seg_logits.device, dtype=seg_logits.dtype
+                (batch_size, 1, *seg_logits.shape[2:]),
+                device=seg_logits.device,
+                dtype=seg_logits.dtype,
             )
             logits_for_argmax = torch.cat([bg_pad, seg_logits], dim=1)
             seg_pred = torch.argmax(logits_for_argmax, dim=1)
@@ -746,7 +827,7 @@ class SAM3RSSegmentor:
                     image_path=image_paths[b],
                     seg_logits=seg_logits[b],
                     seg_pred=seg_pred[b],
-                    per_class_results={}, # Detailed results not supported in batch mode yet
+                    per_class_results={},  # Detailed results not supported in batch mode yet
                     semantic_logits=None,
                     instance_logits=None,
                 )

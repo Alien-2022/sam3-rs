@@ -128,12 +128,16 @@ def build_segmentor(seg_cfg: Dict[str, Any]) -> SAM3RSSegmentor:
     return SAM3RSSegmentor(infer_cfg)
 
 
-def save_prediction(pred: torch.Tensor, save_dir: str, image_path: str) -> None:
+def save_prediction(pred_np: np.ndarray, save_dir: str, image_path: str) -> None:
     os.makedirs(save_dir, exist_ok=True)
     base = os.path.splitext(os.path.basename(image_path))[0]
     out_path = os.path.join(save_dir, f"{base}_pred.png")
-    Image.fromarray(pred.cpu().numpy().astype("uint8")).save(out_path)
-
+    # 这里得到mask是标签值向左移一位的，且不包含no-data类别:
+    # [background:0, building:1, road:2, water:3, barren:4, forest:5, agriculture:6]
+    # 但 gt mask 包含no-data类别，且标签值未移动
+    # 所以为对齐需要加1恢复原标签值
+    pred_np += 1
+    Image.fromarray(pred_np).save(out_path)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate SAM3-RS on a dataset")
@@ -196,18 +200,32 @@ def main() -> None:
 
     total_imgs = len(loader.dataset)
     processed = 0
+    
+    # Timing accumulation
+    t_data = 0
+    t_infer = 0
+    t_eval = 0
+    
+    t_start_loop = time.time()
     for batch in loader:
+        t_data_ready = time.time()
+        t_data += (t_data_ready - t_start_loop)
+        
         paths = batch["image_path"]
         masks = batch["mask"]
         
         # Select inference mode
+        t_infer_start = time.time()
         if args.use_batch:
             # High-speed batch inference (B > 1)
             results = segmentor.predict_batch(paths, detailed=False)
         else:
             # Standard serial inference (one by one)
             results = [segmentor.predict_single(p, detailed=False) for p in paths]
+        t_infer_end = time.time()
+        t_infer += (t_infer_end - t_infer_start)
         
+        t_eval_start = time.time()
         for result, gt_mask in zip(results, masks):
             pred = result.seg_pred
             img_path = result.image_path
@@ -217,13 +235,26 @@ def main() -> None:
 
             metric.update(pred_np, gt_np)
             if save_pred_dir is not None:
-                save_prediction(pred, save_pred_dir, img_path)
+                save_prediction(pred_np, save_pred_dir, img_path)
 
             processed += 1
-            print(f"[eval] {processed}/{total_imgs} images done", end="\r")
+            # Average per image display
+            print(f"[eval] {processed}/{total_imgs} images done | Data: {t_data/(processed/8+1e-6):.3f}s/b | Infer: {t_infer/processed:.3f}s/i | Eval: {t_eval/processed:.3f}s/i", end="\r")
+        t_eval += (time.time() - t_eval_start)
 
         if processed >= 100:
             break
+        t_start_loop = time.time()
+
+    # Ensure the final progress line ends with newline
+    if total_imgs > 0:
+        print()
+    
+    print(f"\n--- Timing Summary (per image) ---")
+    print(f"Data loading: {t_data / processed:.3f}s")
+    print(f"Inference:    {t_infer / processed:.3f}s")
+    print(f"Eval/Save:     {t_eval / processed:.3f}s")
+    print(f"Total:        {(t_data + t_infer + t_eval) / processed:.3f}s\n")
 
     # Ensure the final progress line ends with newline
     if total_imgs > 0:
@@ -244,7 +275,7 @@ def main() -> None:
             "confidence_threshold", 0.5
         )
         # Create directory if it doesn't exist
-        cur_time=time.strftime("%m-%d_%H%M", time.localtime())
+        cur_time=time.strftime("%m%d_%H%M", time.localtime())
         os.makedirs(os.path.dirname(metrics_json), exist_ok=True)
         with open(metrics_json, "w", encoding="utf-8") as f:
             json.dump(scores_with_detail, f, indent=2)
