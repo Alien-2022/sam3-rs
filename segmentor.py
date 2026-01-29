@@ -325,7 +325,6 @@ class SAM3RSSegmentor:
                 (batch_size, self.num_prompts, h_orig, w_orig), device=self.device
             )
 
-            num_queries = 200  # SAM3 默认每张图 200 个 query
             # 关键：构造 Batch 模式的 FindStage
             # 每张图片会自动产生 200 个 query，所以 img_ids 只需要包含 batch 中的图片索引即可
             find_stage = FindStage(

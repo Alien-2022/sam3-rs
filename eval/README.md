@@ -7,6 +7,8 @@
 - `configs/`：示例 YAML 配置（含 LoveDA），支持 `base_config` 继承通用默认
 - `datasets/`：数据集加载（当前包含 LoveDA）
 - `metrics/`：流式 mIoU/mAcc/aAcc 指标
+- `colormaps/`：颜色映射表配置（支持扩展新数据集）
+- `visualization.py`：可视化对比工具（GT vs 预测）
 
 ## 快速开始
 ```bash
@@ -58,6 +60,92 @@ python core/sam3-rs/eval/run_eval.py \
 ## 指标
 - `mIoU` / `mAcc` / `aAcc`，流式混淆矩阵实现，内存占用低。
 - 终端与 `metrics_json` 会输出逐类 IoU（键为类名）；内部使用 `SegmentationMetric.per_class_iou()`。
+
+## 可视化对比
+提供 GT mask 与预测 mask 的可视化对比功能，支持多种数据集。
+
+### 快速使用
+
+**查看可用颜色映射**
+```bash
+python core/sam3-rs/eval/visualization.py --list-colormaps
+```
+
+**LoveDA 数据集**
+```bash
+# 单张图片对比（使用 GT 原始标签 0-7）
+python core/sam3-rs/eval/visualization.py \
+  --gt /path/to/gt_mask.png \
+  --pred /path/to/pred_mask.png \
+  --output /path/to/comparison.png \
+  --colormap loveda
+
+# 批量对比（使用预测标签 0-6）
+python core/sam3-rs/eval/visualization.py \
+  --gt /path/to/gt_masks/ \
+  --pred /path/to/pred_masks/ \
+  --output /path/to/output_dir/ \
+  --colormap loveda_pred
+```
+
+**自定义数据集**
+```bash
+# 1. 创建颜色映射 JSON（参考 configs/class_info_example.json）
+# 2. 运行可视化
+python core/sam3-rs/eval/visualization.py \
+  --gt /path/to/gt_masks/ \
+  --pred /path/to/pred_masks/ \
+  --output /path/to/output_dir/ \
+  --colormap custom \
+  --colormap-file /path/to/custom_colormap.json
+```
+
+### Python API
+
+```python
+from visualization import visualize, batch_visualize
+from colormaps import get_colormap, load_colormap_from_json
+
+# 使用预定义颜色映射
+colormap = get_colormap("loveda")
+visualize("gt.png", "pred.png", "comparison.png", colormap=colormap)
+
+# 从 JSON 加载自定义颜色映射
+colormap = load_colormap_from_json("custom_colormap.json")
+batch_visualize("gt_dir/", "pred_dir/", "output_dir/", colormap=colormap)
+```
+
+### 颜色映射格式
+
+```json
+{
+  "0": {"name": "background", "color": [255, 255, 255]},
+  "1": {"name": "building", "color": [128, 0, 0]},
+  "2": {"name": "road", "color": [128, 128, 128]},
+  ...
+}
+```
+
+### 添加新数据集颜色映射
+
+在 `colormaps/__init__.py` 中添加：
+```python
+MY_DATASET = {
+    0: {"name": "class0", "color": [255, 255, 255]},
+    1: {"name": "class1", "color": [255, 0, 0]},
+    ...
+}
+
+COLORMAPS = {
+    ...
+    "my_dataset": MY_DATASET,
+}
+```
+
+### 输出说明
+- 生成 2 子图对比：GT、预测
+- 包含完整类别图例
+- 支持批量处理整个目录
 
 ## 依赖
 - PyTorch、Pillow、PyYAML、NumPy

@@ -130,15 +130,20 @@ def build_segmentor(seg_cfg: Dict[str, Any]) -> SAM3RSSegmentor:
     return SAM3RSSegmentor(infer_cfg)
 
 
-def save_prediction(pred_np: np.ndarray, save_dir: str, image_path: str) -> None:
+def save_prediction(pred_np: np.ndarray, save_dir: str, image_path: str,
+                    gt_mask: Optional[np.ndarray] = None) -> None:
     os.makedirs(save_dir, exist_ok=True)
     base = os.path.splitext(os.path.basename(image_path))[0]
-    out_path = os.path.join(save_dir, f"{base}_pred.png")
+    out_path = os.path.join(save_dir, f"{base}.png")
     # 这里得到mask是标签值向左移一位的，且不包含no-data类别:
     # [background:0, building:1, road:2, water:3, barren:4, forest:5, agriculture:6]
     # 但 gt mask 包含no-data类别，且标签值未移动
     # 所以为对齐需要加1恢复原标签值
     pred_np += 1
+    # 将 GT 中 no-data 区域（值为0）应用到预测结果中
+    if gt_mask is not None:
+        gt_np = gt_mask.cpu().numpy() if torch.is_tensor(gt_mask) else gt_mask
+        pred_np[gt_np == 0] = 0
     Image.fromarray(pred_np).save(out_path)
 
 def parse_args() -> argparse.Namespace:
@@ -238,14 +243,14 @@ def main() -> None:
 
             metric.update(pred_np, gt_np)
             if save_pred_dir is not None:
-                save_prediction(pred_np, save_pred_dir, img_path)
+                save_prediction(pred_np, save_pred_dir, img_path, gt_mask)
 
             processed += 1
             # Average per image display
             print(f"[eval] {processed}/{total_imgs} images done | Data: {t_data/(processed/8+1e-6):.3f}s/b | Infer: {t_infer/processed:.3f}s/i | Eval: {t_eval/processed:.3f}s/i", end="\r")
         t_eval += (time.time() - t_eval_start)
 
-        if processed >= 40:
+        if processed >= 120:
             break
         t_start_loop = time.time()
 
@@ -270,15 +275,45 @@ def main() -> None:
         cls_name: float(iou) for cls_name, iou in zip(dataset.classes, per_class_iou)
     }
 
+    # Clear progress line and print JSON output
+    print()  # Ensure progress line ends properly
+    print("=" * 80)  # Separator line
+    print("Evaluation Results:")
+    print("=" * 80)
     print(json.dumps(scores_with_detail, indent=2))
 
     if metrics_json is not None:
-        scores_with_detail["prob_threshold"] = cfg["segmentor"].get("prob_threshold", 0.1)
-        scores_with_detail["confidence_threshold"] = cfg["segmentor"].get(
-            "confidence_threshold", 0.5
-        )
+        scores_with_detail["prob_threshold"] = segmentor.config.prob_threshold
+        scores_with_detail["confidence_threshold"] = segmentor.config.confidence_threshold
+        scores_with_detail["use_semantic_head"] = segmentor.config.use_semantic_head
+        scores_with_detail["use_instance_head"] = segmentor.config.use_instance_head
+        scores_with_detail["use_presence_score"]=segmentor.config.use_presence_score
+
+        # Save prompts information
+        if segmentor.prompts is not None:
+            # Group prompts by class index for better readability
+            prompts_by_class = {}
+            for name, idx in zip(segmentor.prompts["names"], segmentor.prompts["indices"]):
+                if idx not in prompts_by_class:
+                    prompts_by_class[idx] = []
+                prompts_by_class[idx].append(name)
+
+            # Sort by class index to maintain order
+            prompts_list = []
+            for class_idx in sorted(prompts_by_class.keys()):
+                prompt_list = prompts_by_class[class_idx]
+                # Join synonyms with comma, same format as input txt
+                prompts_list.append(",".join(prompt_list))
+
+            scores_with_detail["prompts"] = {
+                "names": prompts_list,  # e.g., ["background", "building,structure,construction", "road", ...]
+                "num_classes": segmentor.num_classes,
+                "num_prompts": segmentor.num_prompts,
+            }
+
+        cur_time=time.strftime("%m%d_%H%M", time.localtime())
+        scores_with_detail["run_time"] = cur_time
         # Create directory if it doesn't exist
-        # cur_time=time.strftime("%m%d_%H%M", time.localtime())
         os.makedirs(os.path.dirname(metrics_json), exist_ok=True)
         with open(metrics_json, "w", encoding="utf-8") as f:
             json.dump(scores_with_detail, f, indent=2)

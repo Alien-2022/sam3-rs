@@ -153,7 +153,7 @@ Thumbs.db
 *.vocab
 
 # pred and output files
-outputs/preds/
+outputs/
 
 # dataset
 data/*
