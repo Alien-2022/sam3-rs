@@ -159,3 +159,5 @@ outputs/preds/
 data/*
 
 weights/
+
+test/

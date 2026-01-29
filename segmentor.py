@@ -190,7 +190,7 @@ class SAM3RSSegmentor:
         inference_state = None
         # Use float32 autocast to avoid bf16/float32 weight mismatch on some backbones
         with torch.no_grad(), torch.autocast(
-            device_type=self.device.type, dtype=torch.float32
+            device_type=self.device.type, dtype=torch.bfloat16
         ):
             inference_state = self.processor.set_image(image)
 
@@ -370,95 +370,72 @@ class SAM3RSSegmentor:
                 # semantic_seg: [B, 1, 288, 288]
                 # pred_logits: [B, 200, 1]
                 # presence_score: [B, 1, 1]
+                # presence_logit_dec: [B, 1]
                 out_logits = outputs["pred_logits"]
                 out_masks = outputs["pred_masks"]
                 out_probs = out_logits.sigmoid()
                 presence_score = outputs["presence_logit_dec"].sigmoid().unsqueeze(1)
-                print(f"out_probs shape: {out_probs.shape}")
-                print(f"presence_score shape: {presence_score.shape}")
+               
+                # [B, 200]
+                out_probs = (out_probs * presence_score).squeeze(-1)  # [B, 200]
 
-                out_probs = (out_probs * presence_score).squeeze(-1)
+                # Mask filtering: keep only queries above confidence threshold
+                # But we preserve batch dimension by zeroing out low-confidence masks
+                mask_keep = out_probs > self.config.confidence_threshold  # [B, 200]
+                # [B, 200, 1, 1]
 
-                keep = out_probs > self.config.confidence_threshold
-                out_probs = out_probs[keep]
-                out_masks = out_masks[keep]
+                mask_keep_expanded = mask_keep.unsqueeze(-1).unsqueeze(-1)
 
-                out_masks = F.interpolate(
-                    out_masks.unsqueeze(1),
+                # Zero out low-confidence queries (preserves shape)
+                # [B, 200, 288, 288]
+                out_masks = out_masks * mask_keep_expanded.float()
+                # [B, 200]
+                scores = out_probs * mask_keep.float()
+
+                # Interpolate masks to original image size
+                # [B, 200, h_orig, w_orig]
+                inst_mask_logits = F.interpolate(
+                    out_masks,
                     (h_orig, w_orig),
                     mode="bilinear",
                     align_corners=False,
                 ).sigmoid()
 
-                out_semantic_masks = F.interpolate(
+                # Semantic segmentation
+                # [B, 1, h_orig, w_orig]
+                sem_mask_logits = F.interpolate(
                     outputs["semantic_seg"],
                     (h_orig, w_orig),
                     mode="bilinear",
                     align_corners=False,
                 ).sigmoid()
 
-                scores = out_probs
-                masks_logits = out_masks
-                semantic_seg = out_semantic_masks
-                # check the shape
-                print(f"scores shape: {scores.shape}")
-                print(f"masks_logits shape: {masks_logits.shape}")
-                print(f"semantic_seg shape: {semantic_seg.shape}")
-                import sys
+                # ===== Dual-Head Fusion (Batch Version) =====
+                # Initialize current_logits for this prompt
+                current_batch_logits = torch.zeros((batch_size, h_orig, w_orig), device=self.device)
 
-                sys.exit(0)
+                # 1. Instance head (200 queries fusion)
+                if self.config.use_instance_head:
+                    # inst_mask_logits: [B, 200, h_orig, w_orig]
+                    # Fusion: max over queries (WITHOUT score weighting, same as single mode)
+                    # Note: single mode uses pure max without score multiplication
+                    inst_current = inst_mask_logits.max(dim=1)[0]  # [B, h_orig, w_orig]
+                    current_batch_logits = torch.max(current_batch_logits, inst_current)
 
-                # --- 分支 A: 语义头 (Semantic Head) ---
-                sem_logits = outputs["semantic_seg"]  # [B, 1, 288, 288]
-                sem_probs = (
-                    F.interpolate(
-                        sem_logits,
-                        size=(h_orig, w_orig),
-                        mode="bilinear",
-                        align_corners=False,
-                    )
-                    .squeeze(1)
-                    .sigmoid()
-                )
+                # 2. Semantic head
+                if self.config.use_semantic_head:
+                    # sem_mask_logits: [B, 1, h_orig, w_orig] -> [B, h_orig, w_orig]
+                    sem_current = sem_mask_logits.squeeze(1)
+                    current_batch_logits = torch.max(current_batch_logits, sem_current)
 
-                # --- 分支 B: 实例头 (Instance Head) ---
-                # pred_masks 就是
-                inst_masks = outputs["pred_masks"]  # [B, 200, 288, 288]
-
-                # 计算综合分数 = 类别置信度 * 存在性概率
-                # 显式重塑形状以确保在不同 Batch Size 下广播正常 (防止 [B, 200, 1] * [B, 1] 报错)
-                p_logits = (
-                    outputs["pred_logits"].sigmoid().view(batch_size, num_queries, 1, 1)
-                )
-                p_presence = (
-                    outputs["presence_logit_dec"].sigmoid().view(batch_size, 1, 1, 1)
-                )
-                inst_scores = p_logits * p_presence
-
-                # 将 200 个 query 的 Mask 融合为一张概率图 (Max 融合)
-                # 在低分辨率下运算以节省显存
-                inst_fused_small = (inst_masks.sigmoid() * inst_scores).max(dim=1)[
-                    0
-                ]  # [B, 288, 288]
-                inst_probs = F.interpolate(
-                    inst_fused_small.unsqueeze(1),
-                    size=(h_orig, w_orig),
-                    mode="bilinear",
-                    align_corners=False,
-                ).squeeze(1)
-
-                # --- 双头融合与 Presence 得分过滤 ---
-                current_batch_logits = torch.max(inst_probs, sem_probs)
-
+                # 3. Presence score filtering (if enabled)
+                # Note: same as single mode - apply to fused result after dual-head fusion
                 if self.config.use_presence_score:
-                    # 采用 200 个 query 中的最大存在得分作为图像系数
-                    img_presence = (
-                        outputs["presence_logit_dec"].sigmoid().max(dim=1)[0]
-                    )  # [B, 1]
-                    current_batch_logits = current_batch_logits * img_presence.view(
-                        batch_size, 1, 1
-                    )
+                    # Use max presence score across queries for each image
+                    img_presence = outputs["presence_logit_dec"].sigmoid().max(dim=1)[0]  # [B]
+                    current_batch_logits = current_batch_logits * img_presence.unsqueeze(-1).unsqueeze(-1)
 
+                # Store in batch_seg_logits
                 batch_seg_logits[:, prompt_idx] = current_batch_logits
 
         return batch_seg_logits, [{} for _ in range(batch_size)], None, None

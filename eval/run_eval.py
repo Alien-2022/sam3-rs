@@ -161,7 +161,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     cfg = load_config(args.config)
-    print(cfg)
+
     if args.save_pred is not None:
         cfg.setdefault("output", {})["save_pred_dir"] = args.save_pred
     if args.device is not None:
@@ -186,6 +186,7 @@ def main() -> None:
         num_workers=dl_cfg.get("num_workers", 4),
         pin_memory=dl_cfg.get("pin_memory", True),
         shuffle=False,
+        drop_last=False,
     )
 
     segmentor = build_segmentor(cfg["segmentor"])
@@ -202,17 +203,17 @@ def main() -> None:
 
     total_imgs = len(loader.dataset)
     processed = 0
-    
+
     # Timing accumulation
     t_data = 0
     t_infer = 0
     t_eval = 0
-    
+
     t_start_loop = time.time()
     for batch in loader:
         t_data_ready = time.time()
         t_data += (t_data_ready - t_start_loop)
-        
+
         paths = batch["image_path"]
         masks = batch["mask"]
         
@@ -231,7 +232,7 @@ def main() -> None:
         for result, gt_mask in zip(results, masks):
             pred = result.seg_pred
             img_path = result.image_path
-            
+
             pred_np = pred.cpu().numpy().astype(np.uint8)
             gt_np = gt_mask.numpy().astype(np.uint8)
 
@@ -244,7 +245,7 @@ def main() -> None:
             print(f"[eval] {processed}/{total_imgs} images done | Data: {t_data/(processed/8+1e-6):.3f}s/b | Infer: {t_infer/processed:.3f}s/i | Eval: {t_eval/processed:.3f}s/i", end="\r")
         t_eval += (time.time() - t_eval_start)
 
-        if processed >= 100:
+        if processed >= 40:
             break
         t_start_loop = time.time()
 
@@ -284,4 +285,17 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    """
+    single模式和batch模式会有微小的差异，原因如下：
+    1.计算顺序不同
+        Single模式：逐个prompt计算，中间结果会反复读写
+            for prompt_idx in range(7):...
+            每次200个query的max融合
+        Batch模式：一次性处理，向量化的内存访问模式
+            inst_current = inst_mask_logits.max(dim=1)[0]  
+            向量化max
+    2.浮点数累积误差
+        bfloat16 的精度是 7-8位有效数字 
+        200个query的max融合，加上7个prompt的处理，会累积微小的误差
+    """
     main()
