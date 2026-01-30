@@ -177,7 +177,7 @@ def save_results_from_single_inference(image, result, base_name, colors=COLORS, 
             save_heatmaps_color(result.instance_logits, f"{base_path}_instance_heat")
 
 
-def run_single_inference(segmentor, image_path, output_dir, img_name, save_heatmap=False):
+def run_single_inference(segmentor: SAM3RSSegmentor, image_path, output_dir, img_name, save_heatmap=False):
     """
     Run inference once with dual head enabled, save all three results.
 
@@ -194,8 +194,6 @@ def run_single_inference(segmentor, image_path, output_dir, img_name, save_heatm
     print("\n" + "=" * 60)
     print("Running Single Inference (Dual Head Enabled)")
     print("=" * 60)
-    print(f"use_semantic_head: {segmentor.config.use_semantic_head}")
-    print(f"use_instance_head: {segmentor.config.use_instance_head}")
 
     result = segmentor.predict_single(image_path, detailed=False)
 
@@ -216,12 +214,14 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
     # Model paths
-    checkpoint_path = get_weight_path("sam3")
+    # checkpoint_path = get_weight_path("sam3")
+    checkpoint_path = os.path.join(SAM_RS_DIR, "weights/sam3/sam3.pt")
     bpe_path = os.path.join(script_dir, "sam3", "assets", "bpe_simple_vocab_16e6.txt.gz")
 
     # Test image path
-    dataset_path = get_data_path("LoveDA")
-    test_image_path = os.path.join(dataset_path, "Val/Rural/images_png/2522.png")
+    # dataset_path = get_data_path("LoveDA")
+    dataset_path = os.path.join(SAM_RS_DIR, "data/LoveDA")
+    test_image_path = os.path.join(dataset_path, "Exp/img/2522.png")
 
     # Prompts file for multi-class segmentation
     # prompts_file = os.path.join(script_dir, "configs/loveda_classes.txt")

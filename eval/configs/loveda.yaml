@@ -36,5 +36,5 @@ segmentor:
   weight_key: null
 
 output:
-  save_pred_dir: outputs/preds/loveda
+  # save_pred_dir: outputs/preds/loveda
   metrics_json: outputs/metrics/loveda.json

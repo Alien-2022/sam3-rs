@@ -115,6 +115,10 @@ class SAM3RSSegmentor:
                 f"✓ SAM3-RS initialized with {self.num_classes} classes, {self.num_prompts} prompts"
             )
 
+        # Pre-compute text features for all prompts to avoid repeated computation
+        self.text_features_cache = None
+        self._precompute_text_features()
+
     def _load_prompts(self, prompts_file: Optional[str]) -> Optional[Dict]:
         """Load class names and their indices from config file.
 
@@ -155,6 +159,38 @@ class SAM3RSSegmentor:
                     mapping[synonym] = class_id
 
         return {"names": names, "indices": indices, "mapping": mapping}
+
+    def _precompute_text_features(self):
+        """Pre-compute text features for all prompts to avoid repeated computation during inference."""
+        if not self.prompts or self.num_prompts == 0:
+            return
+
+        print(f"Pre-computing text features for {self.num_prompts} prompts...")
+
+        # Initialize cache dictionary
+        self.text_features_cache = {}
+
+        with torch.no_grad(), torch.autocast(
+            device_type=self.device.type, dtype=torch.bfloat16
+        ):
+            for prompt_idx, prompt_word in enumerate(self.prompts["names"]):
+                # Compute text features for this prompt
+                text_outputs = self.processor.model.backbone.forward_text(
+                    [prompt_word], device=self.device
+                )
+
+                # Store the features in cache
+                self.text_features_cache[prompt_idx] = {
+                    "language_features": text_outputs.get("language_features"),
+                    "language_mask": text_outputs.get("language_mask"),
+                    "language_embeds": text_outputs.get("language_embeds"),
+                }
+
+                # Progress indicator
+                if (prompt_idx + 1) % 10 == 0 or prompt_idx == self.num_prompts - 1:
+                    print(f"  Progress: {prompt_idx + 1}/{self.num_prompts}")
+
+        print(f"✓ Text features pre-computed successfully!")
 
     def _inference_single_view(
         self, image: Image.Image, detailed: bool = False
@@ -242,9 +278,37 @@ class SAM3RSSegmentor:
                                 align_corners=False,
                             ).squeeze()  # [H, W]
 
-                            # Accumulate with max pooling over instances (without score weighting)
-                            # NOTE: Score weighting is applied via presence_score at the end
+                            # ========================================================================
+                            # 方式1（当前使用）：纯 max 融合，不乘 instance_score
+                            # ========================================================================
                             # inst_current = torch.max(inst_current, inst_logits)
+
+                            # ========================================================================
+                            # 方式2（SegEarthOV3 方式）：乘以 instance_score 后再取 max
+                            # 优点：高置信度的实例对最终结果影响更大
+                            # 缺点：可能会过度依赖分数，低置信度的有效实例被忽略
+                            # ========================================================================
+                            # inst_current = torch.max(inst_current, inst_logits * inst_score)
+
+                            # ========================================================================
+                            # 方式3（加权平均融合）：所有实例按分数加权求和
+                            # 优点：考虑了所有实例的贡献，更平滑
+                            # 缺点：计算量更大，可能模糊边界
+                            # ========================================================================
+                            # if inst_score > self.config.confidence_threshold:
+                            #     inst_current = inst_current + inst_logits * inst_score
+                            # count += 1
+                            # if count > 0:
+                            #     inst_current = inst_current / count
+
+                            # ========================================================================
+                            # 方式4（阈值过滤 + max）：只保留置信度超过阈值的实例再取 max
+                            # 优点：过滤低质量实例，保持边界清晰
+                            # 缺点：需要调整阈值参数
+                            # ========================================================================
+                            # if inst_score > self.config.confidence_threshold:
+                            #     inst_current = torch.max(inst_current, inst_logits)
+
                             inst_current = torch.max(inst_current, inst_logits)
 
                     current_logits = torch.max(current_logits, inst_current)
@@ -279,12 +343,33 @@ class SAM3RSSegmentor:
 
                 # 3. Presence score filtering
                 # NOTE: Following SegEarthOV3's approach: apply to fused result (both heads)
-                # Multiply presence_score after max fusion
+                # Multiply presence_score after max fusio
+                # presence_score = output.get("presence_score", -1)
+                # print(f"presence_score of {prompt_word}: {presence_score}")
                 if self.config.use_presence_score:
                     presence_score = output.get("presence_score", 1.0)
                     current_logits = current_logits * presence_score
 
                 seg_logits[prompt_idx] = current_logits
+
+                # ===== 清理当前 prompt 的中间变量，释放 GPU 内存 =====
+                # 删除 output 字典中的大 tensor
+                del output
+
+                # 删除实例头计算过程中的中间变量
+                if self.config.use_instance_head:
+                    del inst_current
+
+                # 删除语义头计算过程中的中间变量
+                if self.config.use_semantic_head:
+                    del semantic_logits
+
+                # 删除当前 logits
+                del current_logits
+
+                # 定期清理 GPU 内存缓存（例如每处理 10 个 prompt）
+                if (prompt_idx + 1) % 10 == 0:
+                    torch.cuda.empty_cache()
 
         # Clean up inference_state to free GPU memory
         # if inference_state is not None:
@@ -344,17 +429,26 @@ class SAM3RSSegmentor:
 
             # 3. 循环遍历每个 Prompt (Decoder / Grounding)
             for prompt_idx, prompt_word in enumerate(self.prompts["names"]):
+                # ===== 使用预计算的文本特征（避免重复计算）=====
                 # 清除历史文本特征
                 for k in ["language_features", "language_mask", "language_embeds"]:
                     if k in backbone_out:
                         del backbone_out[k]
 
-                # 文本特征提取
-                # 相当于 inference single 时的 set_text_prompt
-                text_outputs = self.processor.model.backbone.forward_text(
-                    [prompt_word], device=self.device
-                )
-                backbone_out.update(text_outputs)
+                # 从缓存中获取预计算的文本特征
+                if self.text_features_cache is not None and prompt_idx in self.text_features_cache:
+                    cached_features = self.text_features_cache[prompt_idx]
+                    backbone_out.update({
+                        "language_features": cached_features["language_features"],
+                        "language_mask": cached_features["language_mask"],
+                        "language_embeds": cached_features["language_embeds"],
+                    })
+                else:
+                    # 回退到实时计算（兼容性）
+                    text_outputs = self.processor.model.backbone.forward_text(
+                        [prompt_word], device=self.device
+                    )
+                    backbone_out.update(text_outputs)
 
                 # 解码阶段 (Grounding) - 处理 Batch
                 # 模拟 sam3_image_processor.py中的_forward_grounding
@@ -374,7 +468,7 @@ class SAM3RSSegmentor:
                 out_masks = outputs["pred_masks"]
                 out_probs = out_logits.sigmoid()
                 presence_score = outputs["presence_logit_dec"].sigmoid().unsqueeze(1)
-               
+
                 # [B, 200]
                 out_probs = (out_probs * presence_score).squeeze(-1)  # [B, 200]
 
@@ -411,14 +505,33 @@ class SAM3RSSegmentor:
 
                 # ===== Dual-Head Fusion (Batch Version) =====
                 # Initialize current_logits for this prompt
-                current_batch_logits = torch.zeros((batch_size, h_orig, w_orig), device=self.device)
+                current_batch_logits = torch.zeros(
+                    (batch_size, h_orig, w_orig), device=self.device
+                )
 
                 # 1. Instance head (200 queries fusion)
                 if self.config.use_instance_head:
                     # inst_mask_logits: [B, 200, h_orig, w_orig]
-                    # Fusion: max over queries (WITHOUT score weighting, same as single mode)
-                    # Note: single mode uses pure max without score multiplication
-                    inst_current = inst_mask_logits.max(dim=1)[0]  # [B, h_orig, w_orig]
+                    # ========================================================================
+                    # 方式1（当前使用）：纯 max 融合，不乘 score
+                    # ========================================================================
+                    # inst_current = inst_mask_logits.max(dim=1)[0]  # [B, h_orig, w_orig]
+
+                    # ========================================================================
+                    # 方式2（SegEarthOV3 方式）：乘以 score 后再取 max
+                    # 需要先计算 weighted_logits，然后取 max
+                    # ========================================================================
+                    # scores: [B, 200] -> expand to [B, 200, 1, 1]
+                    weighted_logits = inst_mask_logits * scores.unsqueeze(-1).unsqueeze(-1)
+                    inst_current = weighted_logits.max(dim=1)[0]  # [B, h_orig, w_orig]
+
+                    # ========================================================================
+                    # 方式3（阈值过滤 + max）：只保留高置信度 query
+                    # ========================================================================
+                    # mask_keep = scores > self.config.confidence_threshold  # [B, 200]
+                    # inst_mask_filtered = inst_mask_logits * mask_keep.unsqueeze(-1).unsqueeze(-1).float()
+                    # inst_current = inst_mask_filtered.max(dim=1)[0]
+
                     current_batch_logits = torch.max(current_batch_logits, inst_current)
 
                 # 2. Semantic head
@@ -431,11 +544,33 @@ class SAM3RSSegmentor:
                 # Note: same as single mode - apply to fused result after dual-head fusion
                 if self.config.use_presence_score:
                     # Use max presence score across queries for each image
-                    img_presence = outputs["presence_logit_dec"].sigmoid().max(dim=1)[0]  # [B]
-                    current_batch_logits = current_batch_logits * img_presence.unsqueeze(-1).unsqueeze(-1)
+                    img_presence = (
+                        outputs["presence_logit_dec"].sigmoid().max(dim=1)[0]
+                    )  # [B]
+                    current_batch_logits = (
+                        current_batch_logits * img_presence.unsqueeze(-1).unsqueeze(-1)
+                    )
 
                 # Store in batch_seg_logits
                 batch_seg_logits[:, prompt_idx] = current_batch_logits
+
+                # ===== 清理当前 prompt 的中间变量，释放 GPU 内存 =====
+                # 删除 outputs 字典中的大 tensor
+                del outputs, out_logits, out_masks, out_probs, presence_score
+
+                # 删除计算过程中的中间变量
+                del mask_keep, mask_keep_expanded, scores
+                del inst_mask_logits, sem_mask_logits
+                del weighted_logits, inst_current, sem_current
+
+                # 清理当前 prompt 的计算结果
+                del current_batch_logits
+
+                # 定期清理 GPU 内存缓存（例如每处理 10 个 prompt）
+                if (prompt_idx + 1) % 10 == 0:
+                    torch.cuda.empty_cache()
+                if (prompt_idx + 1) % 10 == 0:
+                    torch.cuda.empty_cache()
 
         return batch_seg_logits, [{} for _ in range(batch_size)], None, None
 
@@ -635,7 +770,7 @@ class SAM3RSSegmentor:
                     [ [[0.0, 0.0]], [[0.4, 0.7]], [[0.3, 0.9]], [[0.0, 0.0]] ], 
                     [ [[0.0, 0.0]], [[0.0, 0.0]], [[0.0, 0.0]], [[0.2, 0.8]] ], 
                 ]
-                得到的结果中, 每个类比(每一行), 只保留了属于该类别的查询词的概率图
+                得到的结果中, 每个类别(每一行), 只保留了属于该类别的查询词的概率图
                 相乘之后: seg_logits.shape: [num_cls,num_queries, h, w]
             取max(1): 
                 遍历每个类别:
@@ -691,6 +826,8 @@ class SAM3RSSegmentor:
             else:
                 pred = torch.argmax(logits, dim=0)
 
+            # Check if the maximum logit value is below threshold
+            # If true, assign to background class
             max_vals = logits.max(0)[0]
             pred[max_vals < self.config.prob_threshold] = bg_idx
             return pred

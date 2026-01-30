@@ -334,4 +334,9 @@ class Sam3Processor:
         state["scores"] = out_probs
 
         state["semantic_seg"] = semantic_seg_mask
+
+        # Add presence_score to state for single mode to access
+        # presence_score is the overall confidence that this class exists in the image
+        state["presence_score"] = presence_score.squeeze(1).item()  # [1] -> scalar
+
         return state
