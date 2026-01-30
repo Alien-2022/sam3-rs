@@ -367,9 +367,10 @@ class SAM3RSSegmentor:
                 # 删除当前 logits
                 del current_logits
 
-                # 定期清理 GPU 内存缓存（例如每处理 10 个 prompt）
-                if (prompt_idx + 1) % 10 == 0:
-                    torch.cuda.empty_cache()
+                # 定期清理 GPU 内存缓存
+                # 单图推理模式仍会调用 forward_text，保持较频繁的清理
+                # if (prompt_idx + 1) % 10 == 0:
+                #     torch.cuda.empty_cache()
 
         # Clean up inference_state to free GPU memory
         # if inference_state is not None:
@@ -566,11 +567,10 @@ class SAM3RSSegmentor:
                 # 清理当前 prompt 的计算结果
                 del current_batch_logits
 
-                # 定期清理 GPU 内存缓存（例如每处理 10 个 prompt）
-                if (prompt_idx + 1) % 10 == 0:
-                    torch.cuda.empty_cache()
-                if (prompt_idx + 1) % 10 == 0:
-                    torch.cuda.empty_cache()
+                # 定期清理 GPU 内存缓存
+                # 由于文本特征已预计算，内存压力减小，可以降低清理频率
+                # if (prompt_idx + 1) % 50 == 0:
+                #     torch.cuda.empty_cache()
 
         return batch_seg_logits, [{} for _ in range(batch_size)], None, None
 
