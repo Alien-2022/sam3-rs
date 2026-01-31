@@ -1,6 +1,7 @@
 base_config: ./base.yaml
 
 dataset:
+  name: loveda
   data_root: data/LoveDA
   # For official LoveDA layout (Val/{Urban,Rural}/{images_png,masks_png})
   img_dir: Exp/img
@@ -11,7 +12,7 @@ dataset:
   ignore_index: 255
   # by default, LoveDA masks use 0 for no-data value, and the segmentor's output like :
   # [background:0, building:1, road:2, water:3, barren:4, forest:5, agriculture:6]
-  # so we first  set reduce_zero_label to true to shift gt labels by -1, making segmentor output and gt aligned.
+  # so we first set reduce_zero_label to true to shift gt labels by -1, making segmentor output and gt aligned.
   # then map no-data 0 to ignore_index 255 in eval, so that no-data pixels are ignored in metrics calculation.
   reduce_zero_label: true
   # Optional: use workspace NAS registry instead of local data_root

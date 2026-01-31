@@ -170,7 +170,7 @@ class SAM3RSSegmentor:
         # Initialize cache dictionary
         self.text_features_cache = {}
 
-        with torch.no_grad(), torch.autocast(
+        with torch.inference_mode(), torch.autocast(
             device_type=self.device.type, dtype=torch.bfloat16
         ):
             for prompt_idx, prompt_word in enumerate(self.prompts["names"]):
@@ -225,7 +225,7 @@ class SAM3RSSegmentor:
 
         inference_state = None
         # Use float32 autocast to avoid bf16/float32 weight mismatch on some backbones
-        with torch.no_grad(), torch.autocast(
+        with torch.inference_mode(), torch.autocast(
             device_type=self.device.type, dtype=torch.bfloat16
         ):
             inference_state = self.processor.set_image(image)
@@ -309,7 +309,7 @@ class SAM3RSSegmentor:
                             # if inst_score > self.config.confidence_threshold:
                             #     inst_current = torch.max(inst_current, inst_logits)
 
-                            inst_current = torch.max(inst_current, inst_logits)
+                            inst_current = torch.max(inst_current, inst_logits * inst_score)
 
                     current_logits = torch.max(current_logits, inst_current)
                     # print("current_logits shape after instance head: ", current_logits.shape)
@@ -460,6 +460,7 @@ class SAM3RSSegmentor:
                     find_target=None,
                 )
 
+
                 # pred_masks: [B, 200, 288, 288]
                 # semantic_seg: [B, 1, 288, 288]
                 # pred_logits: [B, 200, 1]
@@ -569,8 +570,8 @@ class SAM3RSSegmentor:
 
                 # 定期清理 GPU 内存缓存
                 # 由于文本特征已预计算，内存压力减小，可以降低清理频率
-                # if (prompt_idx + 1) % 50 == 0:
-                #     torch.cuda.empty_cache()
+                if (prompt_idx + 1) % 10 == 0:
+                    torch.cuda.empty_cache()
 
         return batch_seg_logits, [{} for _ in range(batch_size)], None, None
 
@@ -892,12 +893,16 @@ class SAM3RSSegmentor:
         # Load images
         images = [Image.open(p).convert("RGB") for p in image_paths]
         # Batch reference for sliding windows is not currently supported.
-        (
-            seg_logits,
-            per_class_results,
-            semantic_logits_only,
-            instance_logits_only,
-        ) = self._inference_batch_view(images, detailed=detailed)
+        try:
+            (
+                seg_logits,
+                per_class_results,
+                semantic_logits_only,
+                instance_logits_only,
+            ) = self._inference_batch_view(images, detailed=detailed)
+        finally:
+            # 确保即使推理失败也清理 images 中的显存引用
+            del images
 
         # Post-process for Each Batch Item
         batch_size = len(image_paths)

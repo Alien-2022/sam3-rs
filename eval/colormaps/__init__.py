@@ -23,9 +23,25 @@ LOVEDA = {
 }
 
 
+# OpenEarthMap 数据集颜色映射
+# GT 原始标签: 0: no-data, 1: Bareland, 2: Rangeland, 3: Developed space, 4: Road, 5: Tree, 6: Water, 7: Agriculture land, 8: Building
+OPENEARTHMAP = {
+    0: {"name": "no-data", "color": [0, 0, 0]},
+    1: {"name": "Bareland", "color": [128, 0, 0]},          # #800000
+    2: {"name": "Rangeland", "color": [0, 255, 36]},       # #00FF24
+    3: {"name": "Developed space", "color": [148, 148, 148]},  # #949494
+    4: {"name": "Road", "color": [255, 255, 255]},         # #FFFFFF
+    5: {"name": "Tree", "color": [34, 97, 38]},            # #226126
+    6: {"name": "Water", "color": [0, 69, 255]},           # #0045FF
+    7: {"name": "Agriculture land", "color": [75, 181, 73]},    # #4BB549
+    8: {"name": "Building", "color": [222, 31, 7]},        # #DE1F07
+}
+
+
 # 注册表：支持的数据集颜色映射
 COLORMAPS = {
     "loveda": LOVEDA,
+    "openearthmap": OPENEARTHMAP,
 }
 
 

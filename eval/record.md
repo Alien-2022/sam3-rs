@@ -139,4 +139,98 @@ whole images
   },
   "run_time": "0129_1437"
 }
+
+{
+  "mIoU": 0.4740942643764664,
+  "mAcc": 0.6203949767017629,
+  "aAcc": 0.6384618076770996,
+  "per_class_iou": {
+    "background": 0.45590516717499263,
+    "building,house": 0.6380381293322571,
+    "road": 0.5388882990933763,
+    "water": 0.5144310744513737,
+    "barren,bareland,soil": 0.357863237891047,
+    "forest,tree": 0.33844816485189594,
+    "agricultural": 0.47508577784032224
+  }
+}
+```
+
+
+### OpenEarthMap
+
+```python
+{
+  "mIoU": 0.42207676571524866,
+  "mAcc": 0.6680068036914069,
+  "aAcc": 0.625824923262487,
+  "per_class_iou": {
+    "background": 0.16577296288079713,
+    "bareland,barren": 0.10627941847225456,
+    "grass": 0.3740099646380354,
+    "pavement": 0.23451839951109482,
+    "road": 0.4174932485155203,
+    "tree,forest": 0.6263201350710951,
+    "water,river": 0.7264529685676762,
+    "cropland": 0.42717494414777984,
+    "building,roof,house": 0.7206688496329846
+  },
+  "prob_threshold": 0.1,
+  "confidence_threshold": 0.1,
+  "use_semantic_head": true,
+  "use_instance_head": true,
+  "use_presence_score": true,
+  "prompts": {
+    "names": [
+      "background",
+      "bareland,barren",
+      "grass",
+      "pavement",
+      "road",
+      "tree,forest",
+      "water,river",
+      "cropland",
+      "building,roof,house"
+    ],
+    "num_classes": 9,
+    "num_prompts": 14
+  },
+  "run_time": "0201_0346"
+}
+
+{
+  "mIoU": 0.4519051729578808,
+  "mAcc": 0.6385198248762893,
+  "aAcc": 0.6243053469640819,
+  "per_class_iou": {
+    "bareland,barren": 0.07098074493504967,
+    "grass": 0.37407545163799905,
+    "pavement": 0.23452805644729421,
+    "road": 0.4175456174418445,
+    "tree,forest": 0.626420474568423,
+    "water,river": 0.7435139236892899,
+    "cropland": 0.4274242886954835,
+    "building,roof,house": 0.7207528262476625
+  },
+  "prob_threshold": 0.1,
+  "confidence_threshold": 0.1,
+  "use_semantic_head": true,
+  "use_instance_head": true,
+  "use_presence_score": true,
+  "prompts": {
+    "names": [
+      "bareland,barren",
+      "grass",
+      "pavement",
+      "road",
+      "tree,forest",
+      "water,river",
+      "cropland",
+      "building,roof,house"
+    ],
+    "num_classes": 8,
+    "num_prompts": 13
+  },
+  "run_time": "0201_0643"
+}
 ```

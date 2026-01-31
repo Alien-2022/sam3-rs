@@ -23,7 +23,7 @@ if str(SAM3_RS_DIR) not in sys.path:
     sys.path.insert(0, str(SAM3_RS_DIR))
 
 from segmentor import SAM3RSSegmentor, InferenceConfig  # type: ignore
-from eval.datasets.loveda import LoveDADataset
+from eval.datasets import DATASET_REGISTRY
 from eval.metrics.seg_metrics import SegmentationMetric
 
 # Optional workspace-level registry helpers (for NAS paths)
@@ -131,7 +131,19 @@ def build_segmentor(seg_cfg: Dict[str, Any]) -> SAM3RSSegmentor:
 
 
 def save_prediction(pred_np: np.ndarray, save_dir: str, image_path: str,
-                    gt_mask: Optional[np.ndarray] = None) -> None:
+                    gt_mask: Optional[np.ndarray] = None,
+                    reduce_zero_label: bool = True) -> None:
+    """
+    保存预测 mask 到磁盘。
+
+    Args:
+        pred_np: 预测的 mask 数组
+        save_dir: 保存预测结果的目录
+        image_path: 原始图像路径（用于文件名）
+        gt_mask: Ground truth mask（可选，用于掩盖 no-data 区域）
+        reduce_zero_label: 是否需要将预测结果 +1 以恢复原始标签
+                           LoveDA 为 True，OpenEarthMap 为 False
+    """
     os.makedirs(save_dir, exist_ok=True)
     base = os.path.splitext(os.path.basename(image_path))[0]
     out_path = os.path.join(save_dir, f"{base}.png")
@@ -139,7 +151,8 @@ def save_prediction(pred_np: np.ndarray, save_dir: str, image_path: str,
     # [background:0, building:1, road:2, water:3, barren:4, forest:5, agriculture:6]
     # 但 gt mask 包含no-data类别，且标签值未移动
     # 所以为对齐需要加1恢复原标签值
-    pred_np += 1
+    if reduce_zero_label:
+        pred_np += 1
     # 将 GT 中 no-data 区域（值为0）应用到预测结果中
     if gt_mask is not None:
         gt_np = gt_mask.cpu().numpy() if torch.is_tensor(gt_mask) else gt_mask
@@ -175,7 +188,15 @@ def main() -> None:
         cfg.setdefault("segmentor", {})["prob_threshold"] = args.prob_threshold
 
     dataset_cfg = cfg["dataset"]
-    dataset = LoveDADataset(
+
+    # Get dataset class from registry
+    dataset_name = dataset_cfg.get("name", "loveda").lower()
+    if dataset_name not in DATASET_REGISTRY:
+        available = ", ".join(DATASET_REGISTRY.keys())
+        raise ValueError(f"Unsupported dataset: {dataset_name}. Available: {available}")
+
+    dataset_class = DATASET_REGISTRY[dataset_name]
+    dataset = dataset_class(
         data_root=dataset_cfg["data_root"],
         img_dir=dataset_cfg["img_dir"],
         mask_dir=dataset_cfg["mask_dir"],
@@ -243,16 +264,20 @@ def main() -> None:
 
             metric.update(pred_np, gt_np)
             if save_pred_dir is not None:
-                save_prediction(pred_np, save_pred_dir, img_path, gt_mask)
+                save_prediction(pred_np, save_pred_dir, img_path, gt_mask,
+                               reduce_zero_label=dataset_cfg.get("reduce_zero_label", True))
 
             processed += 1
             # Average per image display
             print(f"[eval] {processed}/{total_imgs} images done | Data: {t_data/(processed/8+1e-6):.3f}s/b | Infer: {t_infer/processed:.3f}s/i | Eval: {t_eval/processed:.3f}s/i", end="\r")
         t_eval += (time.time() - t_eval_start)
 
-        if processed >= 120:
-            break
+        # if processed >= 20:
+        #     break
         t_start_loop = time.time()
+
+        # 清理 GPU 缓存，避免显存累积
+        torch.cuda.empty_cache()
 
     # Ensure the final progress line ends with newline
     if total_imgs > 0:

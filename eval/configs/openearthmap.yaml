@@ -1,0 +1,44 @@
+base_config: ./base.yaml
+
+dataset:
+  name: openearthmap
+  data_root: data/OpenEarthMap
+  img_dir: Exp/img
+  mask_dir: Exp/mask
+  cls_file: cls_openearthmap.txt
+  ignore_index: 255
+  # OpenEarthMap dataset uses labels 1-8 for 8 classes (0 is no-data).
+  # We set reduce_zero_label=True to map GT labels 1-8 to 0-7, aligning with
+  # segmentor's output indices (0-7) derived from cls_openearthmap.txt.
+  # This ensures correct alignment:
+  #   - Segmentor output: 0=bareland, 1=grass, ..., 7=building
+  #   - GT mask (after reduce): 0=bareland, 1=grass, ..., 7=building
+  # Note: We do NOT include "background" in cls_openearthmap.txt because
+  # OpenEarthMap's background is represented as 0 (no-data) and should be
+  # ignored in metrics, not predicted as a foreground class.
+  reduce_zero_label: true
+  data_key: null
+
+dataloader:
+  # OpenEarthMap images have different sizes (1000x1000, 1024x1024)
+  # so we use a batch size of 1 to handle variable dimensions
+  batch_size: 1  
+
+segmentor:
+  checkpoint_path: weights/sam3/sam3.pt
+  # will be formatted as sam3/assets/bpe_simple_vocab_16e6.txt.gz
+  bpe_path: bpe_simple_vocab_16e6.txt.gz
+  # read by the model to build text prompts and map outputs.
+  prompts_file: cls_openearthmap.txt
+  # confidence threshhold used to filter 200 queries output by decoder.
+  confidence_threshold: 0.1
+  # used to seperate background from foreground in final mask output.
+  prob_threshold: 0.1
+  use_presence_score: true
+  bg_idx: 0
+  prompt_includes_bg: true
+  weight_key: null
+
+output:
+  save_pred_dir: outputs/preds/openearthmap
+  metrics_json: outputs/metrics/openearthmap.json
