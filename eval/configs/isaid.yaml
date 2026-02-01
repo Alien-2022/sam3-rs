@@ -1,0 +1,41 @@
+base_config: ./base.yaml
+
+dataset:
+  name: isaid
+  data_root: data/iSAID
+  img_dir: Exp/img
+  mask_dir: Exp/mask
+  cls_file: cls_iSAID.txt
+  ignore_index: 255
+  # Our preprocessed iSAID dataset uses labels 0-15 for 16 classes (0=background, 1=large vehicle, ..., 15=storage tank).
+  # cls_iSAID.txt defines 15 classes with indices 0-14 (large vehicle to storage tank).
+  # We set reduce_zero_label=True to map GT labels:
+  #   - Original GT: background=0, large vehicle=1, ..., storage tank=15
+  #   - After reduce_zero_label: background=-1, large vehicle=0, ..., storage tank=14
+  #   - Map background(-1) to ignore_index(255) to exclude from metrics
+  # This ensures alignment:
+  #   - Segmentor output (from cls_iSAID.txt): 0=large vehicle, 1=small vehicle, ..., 14=storage tank
+  #   - GT mask (after reduce): 0=large vehicle, 1=small vehicle, ..., 14=storage tank
+  # Note: We do NOT include "background" in cls_iSAID.txt because iSAID's background
+  # should be ignored in metrics, not predicted as a foreground class.
+  reduce_zero_label: true
+  data_key: null
+
+segmentor:
+  checkpoint_path: weights/sam3/sam3.pt
+  bpe_path: bpe_simple_vocab_16e6.txt.gz
+  prompts_file: cls_iSAID.txt
+  # confidence threshhold used to filter 200 queries output by decoder.
+  confidence_threshold: 0.4
+  # used to seperate background from foreground in final mask output.
+  prob_threshold: 0.5
+  use_presence_score: true
+  bg_idx: 0
+  # Set prompt_includes_bg=true because cls_iSAID.txt starts from index 0
+  # (no need to inject a background channel before argmax)
+  prompt_includes_bg: true
+  weight_key: null
+
+output:
+  # save_pred_dir: outputs/preds/iSAID
+  metrics_json: outputs/metrics/iSAID.json

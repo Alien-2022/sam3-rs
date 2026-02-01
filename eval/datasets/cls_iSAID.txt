@@ -1,0 +1,15 @@
+large vehicle
+small vehicle
+harbor
+ship
+ground track field
+soccerball field
+baseball diamond
+swimming pool
+roundabout
+bridge
+tennis court
+basketball court
+plane
+helicopter
+storage tank
