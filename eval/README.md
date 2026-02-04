@@ -35,7 +35,11 @@ python core/sam3-rs/eval/run_eval.py \
   - `checkpoint_path`：权重文件路径
   - `bpe_path`：BPE 词表路径
   - `prompts_file`：提示词/类别文件
-  - `bg_idx` / `prompt_includes_bg`：背景通道控制
+  - `bg_idx` / `use_prompted_background`：背景通道控制
+    - `bg_idx`：输出 mask 中背景类的标签值（应与 GT mask 一致）
+    - `use_prompted_background`：背景处理方式
+      - `false` (默认)：SAM 不分割背景，通过 `prob_threshold` 过滤低置信度像素归为 `bg_idx`
+      - `true`：SAM 显式分割背景类别，`bg_idx` 应与 prompts.txt 中 background 行的索引一致
   - `slide_crop_size` / `slide_stride`：滑窗配置（0 关闭滑窗）
   - `weight_key`（可选）：若提供且存在 `workspace.scripts.get_weights.get_weight_path`，将用注册表路径 + `checkpoint_filename` 覆盖 `checkpoint_path`
   - `checkpoint_filename`（可选）：与 `weight_key` 搭配使用
@@ -56,6 +60,16 @@ python core/sam3-rs/eval/run_eval.py \
 1) 在 `configs/` 复制一份 YAML，改 `data_root/img_dir/mask_dir/cls_file`（或设置 `data_key`）。
 2) 如类别文件不同，替换 `prompts_file`/`cls_file`。
 3) 若目录结构与 LoveDA 不同，可按需新增 Dataset（放入 `datasets/`）并在入口替换。
+4) 在 `datasets/__init__.py` 的 `DATASET_REGISTRY` 中注册新数据集。
+5) 如需可视化，在 `colormaps/__init__.py` 中添加颜色映射。
+
+### 已支持的数据集
+- **LoveDA**: 城市场景语义分割（7类）
+- **OpenEarthMap**: 地物分类（8类）
+- **iSAID**: 遥感航拍目标检测/分割（15类）
+- **Potsdam**: 高分辨率遥感图像分割（6类）
+- **Vaihingen**: 高分辨率遥感图像分割（6类，与 Potsdam 类别相同）
+- **UAVid**: 无人机视频语义分割（8类，包含 moving car 和 static car）
 
 ## 指标
 - `mIoU` / `mAcc` / `aAcc`，流式混淆矩阵实现，内存占用低。

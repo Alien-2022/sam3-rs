@@ -1,5 +1,8 @@
 base_config: ./base.yaml
 
+dataloader:
+  num_workers: 4
+
 dataset:
   name: isaid
   data_root: data/iSAID
@@ -30,10 +33,15 @@ segmentor:
   # used to seperate background from foreground in final mask output.
   prob_threshold: 0.5
   use_presence_score: true
-  bg_idx: 0
-  # Set prompt_includes_bg=true because cls_iSAID.txt starts from index 0
-  # (no need to inject a background channel before argmax)
-  prompt_includes_bg: true
+  # Pixels with max probability below prob_threshold will be assigned this value.
+  # Set to 255 (same as ignore_index) so these uncertain pixels are ignored
+  # during metric calculation, avoiding false positives.
+  # Note: Since reduce_zero_label=True maps GT background(0) to ignore_index(255),
+  # we should also assign low-confidence predictions to 255 to align with GT.
+  bg_idx: 255
+  # Set use_prompted_background=false because cls_iSAID.txt does NOT include "background"
+  # (need to inject a zero-logit background channel before argmax)
+  use_prompted_background: false
   weight_key: null
 
 output:

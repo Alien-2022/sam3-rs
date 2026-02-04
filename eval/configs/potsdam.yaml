@@ -1,0 +1,40 @@
+base_config: ./base.yaml
+
+dataset:
+  name: potsdam
+  data_root: data/Potsdam
+  img_dir: Exp/img
+  mask_dir: Exp/mask
+  cls_file: cls_potsdam.txt
+  ignore_index: 255
+  # Potsdam dataset uses labels 0-5 for 6 classes:
+  #   0 = background
+  #   1 = impervious surface
+  #   2 = building
+  #   3 = low vegetation
+  #   4 = tree
+  #   5 = car
+  # Since cls_potsdam.txt includes background as the first line,
+  # GT labels already align with segmentor output (no need for reduce_zero_label).
+  reduce_zero_label: false
+  data_key: null
+
+segmentor:
+  checkpoint_path: weights/sam3/sam3.pt
+  bpe_path: bpe_simple_vocab_16e6.txt.gz
+  prompts_file: cls_potsdam.txt
+  # confidence threshhold used to filter 200 queries output by decoder.
+  confidence_threshold: 0.2
+  # used to seperate background from foreground in final mask output.
+  prob_threshold: 0.1
+  use_presence_score: false
+  # Background index matches GT label 0
+  bg_idx: 0
+  # Set use_prompted_background=true because cls_potsdam.txt includes "background"
+  # as the first line (no need to inject a zero-logit background channel)
+  use_prompted_background: true
+  weight_key: null
+
+output:
+  # save_pred_dir: outputs/preds/potsdam
+  metrics_json: outputs/metrics/potsdam.json

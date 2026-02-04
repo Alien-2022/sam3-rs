@@ -1,0 +1,6 @@
+clutter
+road
+building
+grass
+tree
+car

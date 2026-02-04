@@ -1,5 +1,9 @@
 base_config: ./base.yaml
 
+dataloader:
+  num_workers: 4
+  batch_size: 6
+
 dataset:
   name: loveda
   data_root: data/LoveDA
@@ -31,7 +35,7 @@ segmentor:
   prob_threshold: 0.5
   use_presence_score: true
   bg_idx: 0
-  prompt_includes_bg: true
+  use_prompted_background: true
   # Optional: use workspace NAS registry for checkpoint
   # When provided, will call workspace.scripts.get_weights.get_weight_path(weight_key)
   weight_key: null

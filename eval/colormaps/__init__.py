@@ -38,10 +38,53 @@ OPENEARTHMAP = {
 }
 
 
+# Potsdam 数据集颜色映射
+# GT 原始标签: 0: background, 1: impervious surface, 2: building, 3: low vegetation, 4: tree, 5: car
+# Potsdam 数据集颜色映射（官方颜色定义）
+# GT 原始标签: 0: background, 1: impervious surface, 2: building, 3: low vegetation, 4: tree, 5: car
+POTSDAM = {
+    0: {"name": "background", "color": [255, 0, 0]},           # #FF0000 (Clutter/background)
+    1: {"name": "impervious surface", "color": [255, 255, 255]},  # #FFFFFF
+    2: {"name": "building", "color": [0, 0, 255]},           # #0000FF
+    3: {"name": "low vegetation", "color": [0, 255, 255]},       # #00FFFF
+    4: {"name": "tree", "color": [0, 255, 0]},              # #00FF00
+    5: {"name": "car", "color": [255, 255, 0]},            # #FFFF00
+}
+
+
+# Vaihingen 数据集颜色映射（与 Potsdam 相同的官方颜色定义）
+# GT 原始标签: 0: background, 1: impervious surface, 2: building, 3: low vegetation, 4: tree, 5: car
+VAIHINGEN = {
+    0: {"name": "background", "color": [255, 0, 0]},           # #FF0000 (Clutter/background)
+    1: {"name": "impervious surface", "color": [255, 255, 255]},  # #FFFFFF
+    2: {"name": "building", "color": [0, 0, 255]},           # #0000FF
+    3: {"name": "low vegetation", "color": [0, 255, 255]},       # #00FFFF
+    4: {"name": "tree", "color": [0, 255, 0]},              # #00FF00
+    5: {"name": "car", "color": [255, 255, 0]},            # #FFFF00
+}
+
+
+# UAVid 数据集颜色映射（官方颜色定义）
+# GT 原始标签: 0: background, 1: building, 2: road, 3: tree, 4: low vegetation, 5: moving car, 6: static car, 7: human
+UAVID = {
+    0: {"name": "background", "color": [0, 0, 0]},           # #000000
+    1: {"name": "building", "color": [128, 0, 0]},           # #800000
+    2: {"name": "road", "color": [128, 64, 128]},            # #804080
+    3: {"name": "tree", "color": [0, 128, 0]},               # #008000
+    4: {"name": "low vegetation", "color": [128, 128, 0]},       # #808000
+    5: {"name": "moving car", "color": [64, 0, 128]},           # #400080
+    6: {"name": "static car", "color": [192, 0, 192]},          # #C000C0
+    7: {"name": "human", "color": [64, 64, 0]},             # #404000
+}
+
+
 # 注册表：支持的数据集颜色映射
 COLORMAPS = {
     "loveda": LOVEDA,
     "openearthmap": OPENEARTHMAP,
+    "potsdam": POTSDAM,
+    "vaihingen": VAIHINGEN,
+    "uavid": UAVID,
 }
 
 

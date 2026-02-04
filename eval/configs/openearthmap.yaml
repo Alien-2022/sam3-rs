@@ -36,7 +36,7 @@ segmentor:
   prob_threshold: 0.1
   use_presence_score: true
   bg_idx: 0
-  prompt_includes_bg: true
+  use_prompted_background: true
   weight_key: null
 
 output:

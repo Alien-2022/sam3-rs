@@ -13,12 +13,18 @@ Usage:
 from .loveda import LoveDADataset
 from .openearthmap import OpenEarthMapDataset
 from .isaid import iSAIDDataset
+from .potsdam import PotsdamDataset
+from .vaihingen import VaihingenDataset
+from .uavid import UAVidDataset
 
 # Dataset registry: maps dataset names to dataset classes
 DATASET_REGISTRY = {
     "loveda": LoveDADataset,
     "openearthmap": OpenEarthMapDataset,
     "isaid": iSAIDDataset,
+    "potsdam": PotsdamDataset,
+    "vaihingen": VaihingenDataset,
+    "uavid": UAVidDataset,
 }
 
 # Export registry for dynamic dataset loading

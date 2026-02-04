@@ -1,7 +1,7 @@
 # Common defaults for eval configs
 dataloader:
-  batch_size: 8
-  num_workers: 1
+  batch_size: 2
+  num_workers: 2
   # accelerate data transfer from CPU to GPU
   pin_memory: true
 

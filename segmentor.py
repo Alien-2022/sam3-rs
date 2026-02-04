@@ -30,9 +30,15 @@ class InferenceConfig:
     confidence_threshold: float = 0.5
     # To return a mask, prob_threshold must be >0 to have effect
     prob_threshold: float = 0.1
+    # Background class index in the output (should match GT mask labels)
+    # Default: 0. Set this to match your dataset's background class ID.
     bg_idx: Optional[int] = 0
-    # Set to True only when prompts.txt 已包含背景类；默认 False 表示需要注入背景通道
-    prompt_includes_bg: bool = False
+    # Whether SAM prompts include background as a separate category.
+    # - False (default): Background is handled via prob_threshold filtering.
+    #   SAM only segments foreground categories; pixels below prob_threshold are assigned to bg_idx.
+    # - True: Background is also prompted to SAM (e.g., "background" in prompts.txt).
+    #   SAM will explicitly segment background as a category. bg_idx should match the line number.
+    use_prompted_background: bool = False
 
     # Head selection (SegEarthOV3 innovation)
     use_semantic_head: bool = True
@@ -817,20 +823,26 @@ class SAM3RSSegmentor:
         bg_idx = 0 if self.config.bg_idx is None else self.config.bg_idx
 
         def logits_to_pred(logits: torch.Tensor) -> torch.Tensor:
-            # If prompts do NOT include background, explicitly add a zero-logit background channel
-            if not self.config.prompt_includes_bg:
+            # Case 1: Background is NOT in prompts - inject a zero-logit background channel
+            if not self.config.use_prompted_background:
+                # Create explicit background channel with zero logits
                 bg_pad = torch.zeros(
                     (1, *logits.shape[1:]), device=logits.device, dtype=logits.dtype
                 )
                 logits_for_argmax = torch.cat([bg_pad, logits], dim=0)
                 pred = torch.argmax(logits_for_argmax, dim=0)
-            else:
-                pred = torch.argmax(logits, dim=0)
 
-            # Check if the maximum logit value is below threshold
-            # If true, assign to background class
-            max_vals = logits.max(0)[0]
-            pred[max_vals < self.config.prob_threshold] = bg_idx
+                # Apply prob_threshold: assign pixels with max logit < threshold to background
+                # This ensures ambiguous/low-confidence regions are marked as background
+                max_vals = logits.max(0)[0]
+                pred[max_vals < self.config.prob_threshold] = bg_idx
+            else:
+                # Case 2: Background IS in prompts - no need to inject background channel
+                pred = torch.argmax(logits, dim=0)
+                # Still apply prob_threshold filtering to suppress low-confidence predictions
+                max_vals = logits.max(0)[0]
+                pred[max_vals < self.config.prob_threshold] = bg_idx
+
             return pred
 
         seg_pred = logits_to_pred(seg_logits)
@@ -861,8 +873,8 @@ class SAM3RSSegmentor:
 
         # Prepare result
         # seg_pred.shape like [H, W], seg_logits.shape like [num_classes, H, W]
-        # when prompt_includes_bg is True, pixel values in seg_pred are class IDs, consistent with the order read from prompts file
-        # when prompt_includes_bg is False, add background=0, class IDs in seg_pred are shifted by 1
+        # when use_prompted_background is True, pixel values in seg_pred are class IDs, consistent with the order read from prompts file
+        # when use_prompted_background is False, add background=0, class IDs in seg_pred are shifted by 1
 
         result = SegmentationResult(
             image_path=image_path,
@@ -924,7 +936,7 @@ class SAM3RSSegmentor:
 
         # Unify prediction logic across batch
         # seg_logits: [B, num_classes, H, W]
-        if not self.config.prompt_includes_bg:
+        if not self.config.use_prompted_background:
             bg_pad = torch.zeros(
                 (batch_size, 1, *seg_logits.shape[2:]),
                 device=seg_logits.device,

@@ -35,53 +35,19 @@
 
 ## predict_batch
 ### LoveDA
-images: 1-120
 ```python
-# bfloat16
 {
-  "mIoU": 0.25727913480159254,
-  "mAcc": 0.4497233713426327,
-  "aAcc": 0.4527964220551619,
+  "mIoU": 0.47406092818297985,
+  "mAcc": 0.6203538651369878,
+  "aAcc": 0.6384518193902684,
   "per_class_iou": {
-    "background": 0.3835701934289131,
-    "building": 0.2824866511361364,
-    "road": 0.32370001415027594,
-    "water": 0.40106193201313867,
-    "barren": 0.10622125711696341,
-    "forest": 0.13572137261713496,
-    "agriculture": 0.16819252314858554
-  },
-  "prob_threshold": 0.5,
-  "confidence_threshold": 0.5,
-  "use_semantic_head": true,
-  "use_instance_head": true,
-  "use_presence_score": false,
-  "prompts": {
-    "names": [
-      "background",
-      "building",
-      "road",
-      "water",
-      "barren",
-      "forest",
-      "agriculture"
-    ]
-  },
-  "run_time": "0129_1358"
-}
-
-{
-  "mIoU": 0.40349948609373726,
-  "mAcc": 0.5343060929543869,
-  "aAcc": 0.6310186466476768,
-  "per_class_iou": {
-    "background": 0.5103268074580884,
-    "building,house": 0.5952755847821758,
-    "road": 0.4495308826785018,
-    "water": 0.3739966197148019,
-    "barren,bareland,soil": 0.3486398900192539,
-    "forest,tree": 0.07773053570461211,
-    "agricultural": 0.4689960822987265
+    "background": 0.4559237351821273,
+    "building,house": 0.6380031739095836,
+    "road": 0.5388812572177888,
+    "water": 0.5145835977803307,
+    "barren,bareland,soil": 0.35757179474610495,
+    "forest,tree": 0.3384234930626181,
+    "agricultural": 0.4750394453823056
   },
   "prob_threshold": 0.5,
   "confidence_threshold": 0.5,
@@ -101,58 +67,7 @@ images: 1-120
     "num_classes": 7,
     "num_prompts": 11
   },
-  "run_time": "0129_1451"
-}
-```
-whole images
-```python
-{
-  "mIoU": 0.3656012947374089,
-  "mAcc": 0.5463910054137766,
-  "aAcc": 0.5123227849860149,
-  "per_class_iou": {
-    "background": 0.3523698816539767,
-    "building,house": 0.5098341822550853,
-    "road": 0.5102812032366598,
-    "water": 0.38721716352578256,
-    "barren,bareland,soil": 0.21897353682432644,
-    "forest,tree": 0.2846337320979808,
-    "agricultural": 0.29589936356805013
-  },
-  "prob_threshold": 0.5,
-  "confidence_threshold": 0.5,
-  "use_semantic_head": true,
-  "use_instance_head": true,
-  "use_presence_score": false,
-  "prompts": {
-    "names": [
-      "background",
-      "building,house",
-      "road",
-      "water",
-      "barren,bareland,soil",
-      "forest,tree",
-      "agricultural"
-    ],
-    "num_classes": 7,
-    "num_prompts": 11
-  },
-  "run_time": "0129_1437"
-}
-
-{
-  "mIoU": 0.4740942643764664,
-  "mAcc": 0.6203949767017629,
-  "aAcc": 0.6384618076770996,
-  "per_class_iou": {
-    "background": 0.45590516717499263,
-    "building,house": 0.6380381293322571,
-    "road": 0.5388882990933763,
-    "water": 0.5144310744513737,
-    "barren,bareland,soil": 0.357863237891047,
-    "forest,tree": 0.33844816485189594,
-    "agricultural": 0.47508577784032224
-  }
+  "run_time": "0203_2218"
 }
 ```
 
@@ -160,6 +75,7 @@ whole images
 ### OpenEarthMap
 
 ```python
+# prompts include background
 {
   "mIoU": 0.42207676571524866,
   "mAcc": 0.6680068036914069,
@@ -197,7 +113,7 @@ whole images
   },
   "run_time": "0201_0346"
 }
-
+# prompts exclude background
 {
   "mIoU": 0.4519051729578808,
   "mAcc": 0.6385198248762893,
@@ -232,5 +148,203 @@ whole images
     "num_prompts": 13
   },
   "run_time": "0201_0643"
+}
+```
+
+### iSAID
+```python
+{
+  "mIoU": 0.34784094607004246,
+  "mAcc": 0.47576070141423943,
+  "aAcc": 0.5229346515759904,
+  "per_class_iou": {
+    "large vehicle": 0.20717353191228197,
+    "small vehicle": 0.5407116827040065,
+    "harbor": 0.4468349692904411,
+    "ship": 0.29554235618120367,
+    "ground track field": 0.051747272195485756,
+    "soccerball field": 0.22298031429469098,
+    "baseball diamond": 0.04586497061243312,
+    "swimming pool": 0.5537742693038646,
+    "roundabout": 0.43958034660888284,
+    "bridge": 0.2174050960475747,
+    "tennis court": 0.33371366905787053,
+    "basketball court": 0.10319594238776097,
+    "plane": 0.9141951482443488,
+    "helicopter": 0.23053010175495658,
+    "storage tank": 0.614364520454835
+  },
+  "prob_threshold": 0.5,
+  "confidence_threshold": 0.4,
+  "use_semantic_head": true,
+  "use_instance_head": true,
+  "use_presence_score": true,
+  "prompts": {
+    "names": [
+      "large vehicle",
+      "small vehicle",
+      "harbor",
+      "ship",
+      "ground track field",
+      "soccerball field",
+      "baseball diamond",
+      "swimming pool",
+      "roundabout",
+      "bridge",
+      "tennis court",
+      "basketball court",
+      "plane",
+      "helicopter",
+      "storage tank"
+    ],
+    "num_classes": 15,
+    "num_prompts": 15
+  },
+  "run_time": "0201_2318"
+}
+```
+
+### Potsdam
+```python
+{
+  "mIoU": 0.5564132842864472,
+  "mAcc": 0.7183652200208174,
+  "aAcc": 0.7768676328659058,
+  "per_class_iou": {
+    "clutter": 0.19079181733580072,
+    "road": 0.7035887028402845,
+    "building": 0.8143184837664226,
+    "grass": 0.6130281996497586,
+    "tree": 0.4227684914227682,
+    "car": 0.5939840107036481
+  },
+  "prob_threshold": 0.1,
+  "confidence_threshold": 0.2,
+  "use_semantic_head": true,
+  "use_instance_head": true,
+  "use_presence_score": false,
+  "prompts": {
+    "names": [
+      "clutter",
+      "road",
+      "building",
+      "grass",
+      "tree",
+      "car"
+    ],
+    "num_classes": 6,
+    "num_prompts": 6
+  },
+  "run_time": "0204_0032"
+}
+```
+
+### Vaihingen
+```python
+{
+  "mIoU": 0.5672098130671359,
+  "mAcc": 0.7558504351284846,
+  "aAcc": 0.7804944283161781,
+  "per_class_iou": {
+    "clutter": 0.04156209976085197,
+    "road": 0.697546180696842,
+    "building": 0.8514050767921953,
+    "grass": 0.4645403021602283,
+    "tree": 0.69460122065504,
+    "car": 0.6536039983376578
+  },
+  "prob_threshold": 0.1,
+  "confidence_threshold": 0.4,
+  "use_semantic_head": true,
+  "use_instance_head": true,
+  "use_presence_score": true,
+  "prompts": {
+    "names": [
+      "clutter",
+      "road",
+      "building",
+      "grass",
+      "tree",
+      "car"
+    ],
+    "num_classes": 6,
+    "num_prompts": 6
+  },
+  "run_time": "0204_1637"
+}
+```
+
+### UAVid
+```python
+{
+  "mIoU": 0.47622316188342917,
+  "mAcc": 0.6080665330939028,
+  "aAcc": 0.7838751475016276,
+  "per_class_iou": {
+    "background": 0.51205688774897,
+    "building": 0.9132951771569179,
+    "road": 0.6385649489913015,
+    "tree": 0.5474290825713808,
+    "vegetation": 0.5156252506880231,
+    "moving car": 0.17053393749394366,
+    "static car": 0.11963841161477543,
+    "human": 0.39264159880212074
+  },
+  "prob_threshold": 0.3,
+  "confidence_threshold": 0.3,
+  "use_semantic_head": true,
+  "use_instance_head": true,
+  "use_presence_score": true,
+  "prompts": {
+    "names": [
+      "background",
+      "building",
+      "road",
+      "tree",
+      "vegetation",
+      "moving car",
+      "static car",
+      "human"
+    ],
+    "num_classes": 8,
+    "num_prompts": 8
+  },
+  "run_time": "0205_0007"
+}
+
+{
+  "mIoU": 0.5752007700439132,
+  "mAcc": 0.705113530911873,
+  "aAcc": 0.8256503211127387,
+  "per_class_iou": {
+    "background": 0.4702021985734755,
+    "building": 0.9122912835793028,
+    "road": 0.638466147049312,
+    "tree": 0.7440699533316074,
+    "grass": 0.5992778226876209,
+    "driving vehicle": 0.3431517919380814,
+    "parking vehicle": 0.5032377718989551,
+    "human": 0.39090919129295104
+  },
+  "prob_threshold": 0.3,
+  "confidence_threshold": 0.3,
+  "use_semantic_head": true,
+  "use_instance_head": true,
+  "use_presence_score": true,
+  "prompts": {
+    "names": [
+      "background",
+      "building",
+      "road",
+      "tree",
+      "grass",
+      "driving vehicle",
+      "parking vehicle",
+      "human"
+    ],
+    "num_classes": 8,
+    "num_prompts": 8
+  },
+  "run_time": "0205_0025"
 }
 ```

@@ -1,0 +1,8 @@
+background
+building
+road
+tree
+grass
+driving vehicle
+parking vehicle
+human

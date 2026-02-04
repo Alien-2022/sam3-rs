@@ -244,12 +244,12 @@ def main():
         confidence_threshold=0.1,  # Lower threshold to keep more detections
         prob_threshold=0.5,
         use_semantic_head=True,
-        use_instance_head=True, 
+        use_instance_head=True,
         use_presence_score=False,
         slide_crop_size=0,        # No sliding window for small images
         slide_stride=1024,
         prompts_file=prompts_file,
-        prompt_includes_bg=True
+        use_prompted_background=True
     )
 
     segmentor = SAM3RSSegmentor(config)
