@@ -52,6 +52,10 @@ class InferenceConfig:
     # Text prompts
     prompts_file: Optional[str] = None  # Path to prompts config
 
+    # Debug options
+    debug_memory: bool = False  # Print memory usage information
+    debug_log_file: Optional[str] = None  # Path to log file for debug output
+
 
 @dataclass
 class SegmentationResult:
@@ -92,6 +96,14 @@ class SAM3RSSegmentor:
         if not (0.0 < config.prob_threshold < 1.0):
             raise ValueError("prob_threshold must be between 0 and 1.")
 
+        # Enable memory debugging and setup logging file FIRST
+        self.debug_memory = config.debug_memory if hasattr(config, 'debug_memory') else False
+        self.debug_log_file = config.debug_log_file
+        self.debug_log_handle = None
+        if self.debug_log_file:
+            import sys
+            self.debug_log_handle = open(self.debug_log_file, 'w', encoding='utf-8')
+
         # Initialize SAM3 model (follow SegEarthOV3's approach)
         from sam3 import build_sam3_image_model
         from sam3.model.sam3_image_processor import Sam3Processor
@@ -104,7 +116,9 @@ class SAM3RSSegmentor:
         # Ensure model weights on target device to avoid CPU/GPU dtype mismatches
         model = model.to(self.device)
         self.processor = Sam3Processor(
-            model, confidence_threshold=config.confidence_threshold, device=self.device
+            model,
+            confidence_threshold=config.confidence_threshold,
+            device=self.device,
         )
 
         # Load prompts if provided
@@ -124,6 +138,37 @@ class SAM3RSSegmentor:
         # Pre-compute text features for all prompts to avoid repeated computation
         self.text_features_cache = None
         self._precompute_text_features()
+
+    def __del__(self):
+        """Close log file on cleanup."""
+        if self.debug_log_handle:
+            self.debug_log_handle.close()
+
+    def _debug_print(self, message: str):
+        """Print debug message to log file only (not to console)."""
+        # Only write to log file to avoid console spam
+        if self.debug_log_handle:
+            self.debug_log_handle.write(message + '\n')
+            self.debug_log_handle.flush()
+
+    def _log_tensor_memory(self, name: str, tensor: torch.Tensor, detail: bool = False):
+        """Log tensor memory usage."""
+        if not self.debug_memory or tensor is None:
+            return
+
+        numel = tensor.numel()
+        element_size = tensor.element_size()
+        memory_mb = numel * element_size / (1024 * 1024)
+
+        msg = f"[MEMORY] {name}: shape={list(tensor.shape)}, dtype={tensor.dtype}, " \
+              f"memory={memory_mb:.2f} MB ({numel:,} elements)"
+        self._debug_print(msg)
+
+        if detail and tensor.dim() > 2:
+            # Log statistics for 3D+ tensors
+            detail_msg = f"        min={tensor.min():.4f}, max={tensor.max():.4f}, " \
+                         f"mean={tensor.mean():.4f}"
+            self._debug_print(detail_msg)
 
     def _load_prompts(self, prompts_file: Optional[str]) -> Optional[Dict]:
         """Load class names and their indices from config file.
@@ -176,7 +221,7 @@ class SAM3RSSegmentor:
         # Initialize cache dictionary
         self.text_features_cache = {}
 
-        with torch.inference_mode(), torch.autocast(
+        with torch.no_grad(), torch.autocast(
             device_type=self.device.type, dtype=torch.bfloat16
         ):
             for prompt_idx, prompt_word in enumerate(self.prompts["names"]):
@@ -199,7 +244,7 @@ class SAM3RSSegmentor:
         print(f"✓ Text features pre-computed successfully!")
 
     def _inference_single_view(
-        self, image: Image.Image, detailed: bool = False
+        self, image: Image.Image, detailed: bool = False, image_name: str = "unknown"
     ) -> Tuple[torch.Tensor, Dict, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Inference on a single image (or crop patch).
@@ -231,18 +276,33 @@ class SAM3RSSegmentor:
 
         inference_state = None
         # Use float32 autocast to avoid bf16/float32 weight mismatch on some backbones
-        with torch.inference_mode(), torch.autocast(
+        with torch.no_grad(), torch.autocast(
             device_type=self.device.type, dtype=torch.bfloat16
         ):
             inference_state = self.processor.set_image(image)
 
+            if self.debug_memory:
+                self._debug_print(f"\n[MEMORY] ===== Image: {image_name}, Size: {w}x{h} =====")
+                self._debug_print(f"[MEMORY] Image feature extraction completed: allocated={torch.cuda.memory_allocated() / 1024**3:.2f} GB, reserved={torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+
             # Process each prompt
             for prompt_idx, prompt_word in enumerate(self.prompts["names"]):
+                if self.debug_memory:
+                    self._debug_print(f"[MEMORY] ===== Prompt [{prompt_idx+1}/{self.num_prompts}]: {prompt_word} =====")
+
                 # Reset prompts for clean inference
                 self.processor.reset_all_prompts(inference_state)
                 output = self.processor.set_text_prompt(
                     state=inference_state, prompt=prompt_word
                 )
+
+                # Only log tensor info for the first prompt (avoid redundancy)
+                if self.debug_memory and prompt_idx == 0:
+                    self._log_tensor_memory("masks_logits", output["masks_logits"])
+                    self._log_tensor_memory("semantic_seg", output["semantic_seg"])
+
+                if self.debug_memory:
+                    self._debug_print(f"[MEMORY] After set_text_prompt: allocated={torch.cuda.memory_allocated() / 1024**3:.2f} GB")
 
                 # Store per-class detailed results if requested (move to CPU to save GPU memory)
                 if detailed:
@@ -262,6 +322,7 @@ class SAM3RSSegmentor:
                 if self.config.use_instance_head:
                     inst_current = torch.zeros((h, w), device=self.device)
                     num_instances = output["masks_logits"].shape[0]
+
                     if num_instances > 0:
                         for inst_id in range(num_instances):
                             # masks_logits: [inst_num, 1, H_orig, W_orig]
@@ -358,7 +419,13 @@ class SAM3RSSegmentor:
 
                 seg_logits[prompt_idx] = current_logits
 
+                if self.debug_memory:
+                    self._log_tensor_memory("seg_logits", seg_logits)
+                    self._debug_print(f"[MEMORY] After fusion: allocated={torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+
                 # ===== 清理当前 prompt 的中间变量，释放 GPU 内存 =====
+                allocated_before = torch.cuda.memory_allocated() if self.debug_memory else 0
+
                 # 删除 output 字典中的大 tensor
                 del output
 
@@ -373,20 +440,24 @@ class SAM3RSSegmentor:
                 # 删除当前 logits
                 del current_logits
 
-                # 定期清理 GPU 内存缓存
-                # 单图推理模式仍会调用 forward_text，保持较频繁的清理
-                # if (prompt_idx + 1) % 10 == 0:
-                #     torch.cuda.empty_cache()
+                # 定期清理 GPU 内存缓存 - 每 5 个 prompt 清理一次，避免频繁清理影响性能
+                if (prompt_idx + 1) % 5 == 0:
+                    torch.cuda.empty_cache()
+
+                if self.debug_memory:
+                    allocated_after = torch.cuda.memory_allocated()
+                    released_gb = (allocated_before - allocated_after) / 1024**3
+                    self._debug_print(f"[MEMORY] After cleanup: allocated={allocated_after / 1024**3:.2f} GB (released: {released_gb:.2f} GB)")
 
         # Clean up inference_state to free GPU memory
-        # if inference_state is not None:
-        #     for key in list(inference_state.keys()):
-        #         if isinstance(inference_state[key], torch.Tensor):
-        #             del inference_state[key]
+        if inference_state is not None:
+            for key in list(inference_state.keys()):
+                if isinstance(inference_state[key], torch.Tensor):
+                    del inference_state[key]
 
         return seg_logits, per_class_results, semantic_logits_only, instance_logits_only
 
-    def _inference_batch_view(self, images: List[Image.Image], detailed: bool = False):
+    def _inference_batch_view(self, images: List[Image.Image], detailed: bool = False, image_names: Optional[List[str]] = None):
         """
         高性能批量推理实现 (True Batch Inference)。
         直接调用底层 model.backbone 和 model.forward_grounding，绕过处理器内部的单图限制。
@@ -396,6 +467,8 @@ class SAM3RSSegmentor:
 
         batch_size = len(images)
         w_orig, h_orig = images[0].size
+        if image_names is None:
+            image_names = [f"img_{i}" for i in range(batch_size)]
 
         # 1. 图像预处理：将 PIL 转换为 Batch Tensor
         # 图像预处理和特征提取相当于 processor.set_image 的前半部分
@@ -406,11 +479,26 @@ class SAM3RSSegmentor:
             input_tensors.append(t)
         batch_input = torch.stack(input_tensors, dim=0)  # [B, 3, 1008, 1008]
 
-        with torch.no_grad(), torch.autocast(
+        with torch.inference_mode(), torch.autocast(
             device_type=self.device.type, dtype=torch.bfloat16
         ):
             # 2. 图像特征提取 (Encoder) - 批量并行
             backbone_out = self.processor.model.backbone.forward_image(batch_input)
+
+            if self.debug_memory:
+                img_info = ", ".join(image_names[:3])
+                if len(image_names) > 3:
+                    img_info += f" ... (+{len(image_names)-3} more)"
+                self._debug_print(f"\n[MEMORY] ===== Batch of {batch_size} images: {img_info} =====")
+                self._debug_print(f"[MEMORY] Image size: {w_orig}x{h_orig}")
+                self._debug_print(f"[MEMORY] Feature extraction completed: allocated={torch.cuda.memory_allocated() / 1024**3:.2f} GB, reserved={torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+
+                # Log backbone output tensors (only once)
+                if "vision_features" in backbone_out:
+                    self._log_tensor_memory("vision_features", backbone_out["vision_features"])
+                if "backbone_fpn" in backbone_out:
+                    for i, fpn_feat in enumerate(backbone_out["backbone_fpn"]):
+                        self._log_tensor_memory(f"backbone_fpn[{i}]", fpn_feat)
 
             # 初始化批量结果 [B, num_prompts, H, W]
             batch_seg_logits = torch.zeros(
@@ -436,6 +524,9 @@ class SAM3RSSegmentor:
 
             # 3. 循环遍历每个 Prompt (Decoder / Grounding)
             for prompt_idx, prompt_word in enumerate(self.prompts["names"]):
+                if self.debug_memory:
+                    self._debug_print(f"[MEMORY] ===== Prompt [{prompt_idx+1}/{self.num_prompts}]: {prompt_word} =====")
+
                 # ===== 使用预计算的文本特征（避免重复计算）=====
                 # 清除历史文本特征
                 for k in ["language_features", "language_mask", "language_embeds"]:
@@ -465,6 +556,15 @@ class SAM3RSSegmentor:
                     geometric_prompt=dummy_geometric,
                     find_target=None,
                 )
+
+                # Only log tensor info for first prompt (avoid redundancy)
+                if self.debug_memory and prompt_idx == 0:
+                    self._log_tensor_memory("pred_masks", outputs["pred_masks"])
+                    self._log_tensor_memory("pred_logits", outputs["pred_logits"])
+                    self._log_tensor_memory("semantic_seg", outputs["semantic_seg"])
+
+                if self.debug_memory:
+                    self._debug_print(f"[MEMORY] After forward_grounding: allocated={torch.cuda.memory_allocated() / 1024**3:.2f} GB")
 
 
                 # pred_masks: [B, 200, 288, 288]
@@ -562,7 +662,12 @@ class SAM3RSSegmentor:
                 # Store in batch_seg_logits
                 batch_seg_logits[:, prompt_idx] = current_batch_logits
 
+                if self.debug_memory:
+                    self._debug_print(f"[MEMORY] After prompt {prompt_idx+1}: allocated={torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+
                 # ===== 清理当前 prompt 的中间变量，释放 GPU 内存 =====
+                allocated_before = torch.cuda.memory_allocated() if self.debug_memory else 0
+
                 # 删除 outputs 字典中的大 tensor
                 del outputs, out_logits, out_masks, out_probs, presence_score
 
@@ -574,15 +679,27 @@ class SAM3RSSegmentor:
                 # 清理当前 prompt 的计算结果
                 del current_batch_logits
 
-                # 定期清理 GPU 内存缓存
-                # 由于文本特征已预计算，内存压力减小，可以降低清理频率
-                if (prompt_idx + 1) % 10 == 0:
+                # 定期清理 GPU 内存缓存 - 每 5 个 prompt 清理一次
+                if (prompt_idx + 1) % 5 == 0:
                     torch.cuda.empty_cache()
+
+                if self.debug_memory:
+                    allocated_after = torch.cuda.memory_allocated()
+                    released_gb = (allocated_before - allocated_after) / 1024**3
+                    self._debug_print(f"[MEMORY] After cleanup: allocated={allocated_after / 1024**3:.2f} GB (released: {released_gb:.2f} GB)")
+
+        # Clean up backbone_out to free GPU memory
+        if 'backbone_out' in dir():
+            for key in list(backbone_out.keys()):
+                if isinstance(backbone_out[key], torch.Tensor):
+                    del backbone_out[key]
+            del backbone_out
+        torch.cuda.empty_cache()
 
         return batch_seg_logits, [{} for _ in range(batch_size)], None, None
 
     def _sliding_window_inference(
-        self, image: Image.Image, detailed: bool = False
+        self, image: Image.Image, detailed: bool = False, image_name: str = "unknown"
     ) -> Tuple[torch.Tensor, Dict, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         Sliding window inference for large images.
@@ -604,6 +721,9 @@ class SAM3RSSegmentor:
         # Skip storing semantic/instance logits in sliding mode to reduce memory footprint
         semantic_logits_only = None
         instance_logits_only = None
+
+        if self.debug_memory:
+            self._debug_print(f"\n[MEMORY] ===== Sliding window: {image_name}, Size: {w_img}x{h_img}, Crop: {crop_size}, Stride: {stride} =====")
 
         # Calculate number of patches
         h_grids = max((h_img - crop_size + stride - 1) // stride + 1, 1)
@@ -629,8 +749,9 @@ class SAM3RSSegmentor:
                 crop_img = image.crop((x1, y1, x2, y2))
 
                 # Inference on crop
+                crop_name = f"{image_name}_patch_{h_idx}_{w_idx}"
                 crop_logits, crop_results, _, _ = self._inference_single_view(
-                    crop_img, detailed=detailed
+                    crop_img, detailed=detailed, image_name=crop_name
                 )
 
                 # Accumulate results
@@ -662,6 +783,7 @@ class SAM3RSSegmentor:
         # Load image
         image = Image.open(image_path).convert("RGB")
         original_shape = (image.height, image.width)
+        image_name = os.path.basename(image_path)
 
         # Choose inference mode
         if self.config.slide_crop_size > 0 and (
@@ -674,7 +796,7 @@ class SAM3RSSegmentor:
                 per_class_results,
                 semantic_logits_only,
                 instance_logits_only,
-            ) = self._sliding_window_inference(image, detailed=detailed)
+            ) = self._sliding_window_inference(image, detailed=detailed, image_name=image_name)
         else:
             # Single view inference
             (
@@ -682,7 +804,7 @@ class SAM3RSSegmentor:
                 per_class_results,
                 semantic_logits_only,
                 instance_logits_only,
-            ) = self._inference_single_view(image, detailed=detailed)
+            ) = self._inference_single_view(image, detailed=detailed, image_name=image_name)
 
         # Resize fused head logits if needed
         if seg_logits.shape[-2:] != original_shape:
@@ -904,6 +1026,7 @@ class SAM3RSSegmentor:
         """
         # Load images
         images = [Image.open(p).convert("RGB") for p in image_paths]
+        image_names = [os.path.basename(p) for p in image_paths]
         # Batch reference for sliding windows is not currently supported.
         try:
             (
@@ -911,7 +1034,7 @@ class SAM3RSSegmentor:
                 per_class_results,
                 semantic_logits_only,
                 instance_logits_only,
-            ) = self._inference_batch_view(images, detailed=detailed)
+            ) = self._inference_batch_view(images, detailed=detailed, image_names=image_names)
         finally:
             # 确保即使推理失败也清理 images 中的显存引用
             del images

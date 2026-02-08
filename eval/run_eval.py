@@ -121,10 +121,17 @@ def build_segmentor(seg_cfg: Dict[str, Any]) -> SAM3RSSegmentor:
     # Drop helper-only keys
     infer_kwargs.pop("weight_key", None)
     infer_kwargs.pop("checkpoint_filename", None)
+
+    # Extract debug_memory and debug_log_file separately
+    debug_memory = infer_kwargs.pop("debug_memory", False)
+    debug_log_file = infer_kwargs.pop("debug_log_file", None)
+
     infer_cfg = InferenceConfig(
         checkpoint_path=infer_kwargs.pop("checkpoint_path"),
         bpe_path=infer_kwargs.pop("bpe_path"),
         device=infer_kwargs.pop("device", "cuda"),
+        debug_memory=debug_memory,
+        debug_log_file=debug_log_file,
         **infer_kwargs,
     )
     return SAM3RSSegmentor(infer_cfg)
@@ -173,6 +180,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-batch", action="store_false", dest="use_batch", help="Use serial predict_single inference"
     )
+    parser.add_argument(
+        "--debug-log", default=None, help="Path to debug log file for memory profiling"
+    )
     return parser.parse_args()
 
 
@@ -186,6 +196,11 @@ def main() -> None:
         cfg.setdefault("segmentor", {})["device"] = args.device
     if args.prob_threshold is not None:
         cfg.setdefault("segmentor", {})["prob_threshold"] = args.prob_threshold
+
+    # Enable debug logging if specified
+    if args.debug_log:
+        cfg.setdefault("segmentor", {})["debug_memory"] = True
+        cfg.setdefault("segmentor", {})["debug_log_file"] = args.debug_log
 
     dataset_cfg = cfg["dataset"]
 
@@ -217,9 +232,26 @@ def main() -> None:
 
     segmentor = build_segmentor(cfg["segmentor"])
 
+    # Get segmentor configuration for metric initialization
+    seg_cfg = cfg.get("segmentor", {})
+    use_prompted_background = seg_cfg.get("use_prompted_background", False)
+    bg_idx = seg_cfg.get("bg_idx", 0)
+
+    # Always use dataset.num_classes for metric
+    # When use_prompted_background=False:
+    #   - GT labels: [1, num_classes] (no semantic background)
+    #   - Predictions: [1, num_classes] after filtering out injected background
+    #   - We map these to [0, num_classes-1] internally for confusion matrix
+    # When use_prompted_background=True:
+    #   - GT labels: [0, num_classes-1] (includes background as valid class)
+    #   - Predictions: [0, num_classes-1]
+    metric_num_classes = dataset.num_classes
+
     metric = SegmentationMetric(
-        num_classes=dataset.num_classes,
+        num_classes=metric_num_classes,
         ignore_index=dataset_cfg.get("ignore_index", 255),
+        use_prompted_background=use_prompted_background,
+        bg_idx=bg_idx,
     )
 
     save_pred_dir = cfg.get("output", {}).get("save_pred_dir")
@@ -229,6 +261,9 @@ def main() -> None:
 
     total_imgs = len(loader.dataset)
     processed = 0
+
+    # Get batch_size for memory cleanup timing (move outside loop for efficiency)
+    batch_size = loader.batch_size if hasattr(loader, 'batch_size') else 1
 
     # Timing accumulation
     t_data = 0
@@ -272,12 +307,15 @@ def main() -> None:
             print(f"[eval] {processed}/{total_imgs} images done | Data: {t_data/(processed/8+1e-6):.3f}s/b | Infer: {t_infer/processed:.3f}s/i | Eval: {t_eval/processed:.3f}s/i", end="\r")
         t_eval += (time.time() - t_eval_start)
 
-        # if processed >= 100:
+        # if processed >= 20:
         #     break
         t_start_loop = time.time()
 
-        # 清理 GPU 缓存，避免显存累积
-        torch.cuda.empty_cache()
+        # 定期清理 GPU 缓存 - 每 5 个 batch 清理一次，避免频繁清理影响性能
+        # torch.cuda.empty_cache()
+        current_batch = (processed // batch_size) + 1
+        if current_batch % 2 == 0:
+            torch.cuda.empty_cache()
 
     # Ensure the final progress line ends with newline
     if total_imgs > 0:
@@ -296,8 +334,17 @@ def main() -> None:
     scores = metric.compute()
     per_class_iou = metric.per_class_iou()
     scores_with_detail = dict(scores)
+
+    # When use_prompted_background=False, confusion matrix has an extra row (index 0)
+    # that corresponds to injected background channel (GT has no such class, so row 0 is empty).
+    # We skip this row and match dataset.classes to per_class_iou[1:].
+    if not use_prompted_background:
+        per_class_iou_for_classes = per_class_iou[1:]
+    else:
+        per_class_iou_for_classes = per_class_iou
+
     scores_with_detail["per_class_iou"] = {
-        cls_name: float(iou) for cls_name, iou in zip(dataset.classes, per_class_iou)
+        cls_name: float(iou) for cls_name, iou in zip(dataset.classes, per_class_iou_for_classes)
     }
 
     # Clear progress line and print JSON output

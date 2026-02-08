@@ -241,6 +241,7 @@
 
 ### Vaihingen
 ```python
+# 切片后
 {
   "mIoU": 0.5672098130671359,
   "mAcc": 0.7558504351284846,
@@ -272,10 +273,43 @@
   },
   "run_time": "0204_1637"
 }
+# 切片前
+{
+  "mIoU": 0.553166798258943,
+  "mAcc": 0.7814889993893548,
+  "aAcc": 0.7871650920759639,
+  "per_class_iou": {
+    "clutter": 0.061584280995001336,
+    "road": 0.6972314427866895,
+    "building": 0.8611610683374367,
+    "grass": 0.5010071052520115,
+    "tree": 0.6837060839943884,
+    "car": 0.5143108081881309
+  },
+  "prob_threshold": 0.1,
+  "confidence_threshold": 0.4,
+  "use_semantic_head": true,
+  "use_instance_head": true,
+  "use_presence_score": true,
+  "prompts": {
+    "names": [
+      "clutter",
+      "road",
+      "building",
+      "grass",
+      "tree",
+      "car"
+    ],
+    "num_classes": 6,
+    "num_prompts": 6
+  },
+  "run_time": "0206_2318"
+}
 ```
 
 ### UAVid
 ```python
+# 切片后，按原数据集类别
 {
   "mIoU": 0.47622316188342917,
   "mAcc": 0.6080665330939028,
@@ -311,7 +345,7 @@
   },
   "run_time": "0205_0007"
 }
-
+# 切片后，类别名优化后
 {
   "mIoU": 0.5752007700439132,
   "mAcc": 0.705113530911873,
@@ -346,5 +380,105 @@
     "num_prompts": 8
   },
   "run_time": "0205_0025"
+}
+# 切片前，类别名优化后
+{
+  "mIoU": 0.5253546403574549,
+  "mAcc": 0.650009483844239,
+  "aAcc": 0.820916920519333,
+  "per_class_iou": {
+    "background": 0.4899124398894829,
+    "building": 0.9096642051149775,
+    "road": 0.6732242093720066,
+    "tree": 0.7171094946009299,
+    "grass": 0.5942192205514711,
+    "driving vehicle": 0.15351011315340216,
+    "parking vehicle": 0.4540278976187022,
+    "human": 0.21116954255866643
+  },
+  "prob_threshold": 0.3,
+  "confidence_threshold": 0.3,
+  "use_semantic_head": true,
+  "use_instance_head": true,
+  "use_presence_score": true,
+  "prompts": {
+    "names": [
+      "background",
+      "building",
+      "road",
+      "tree",
+      "grass",
+      "driving vehicle",
+      "parking vehicle",
+      "human"
+    ],
+    "num_classes": 8,
+    "num_prompts": 8
+  },
+  "run_time": "0207_1751"
+}
+```
+
+### UDD5
+```python
+# 先切片(1024x1024)再分割
+{
+  "mIoU": 0.6582121431400427,
+  "mAcc": 0.8025991117733616,
+  "aAcc": 0.8499296887430657,
+  "per_class_iou": {
+    "background": 0.32835122133198047,
+    "vegetation": 0.8776514800911537,
+    "building": 0.883124573509144,
+    "road": 0.5988441321628741,
+    "vehicle": 0.6030893086050612
+  },
+  "prob_threshold": 0.1,
+  "confidence_threshold": 0.5,
+  "use_semantic_head": true,
+  "use_instance_head": true,
+  "use_presence_score": true,
+  "prompts": {
+    "names": [
+      "background",
+      "vegetation",
+      "building",
+      "road",
+      "vehicle"
+    ],
+    "num_classes": 5,
+    "num_prompts": 5
+  },
+  "run_time": "0205_1551"
+}
+# 直接拿原图分割
+{
+  "mIoU": 0.7167113359558999,
+  "mAcc": 0.8307877410504183,
+  "aAcc": 0.8714044170914359,
+  "per_class_iou": {
+    "background": 0.45210385414816406,
+    "vegetation": 0.8806075020234048,
+    "building": 0.8969873794396269,
+    "road": 0.640596896480756,
+    "vehicle": 0.7132610476875473
+  },
+  "prob_threshold": 0.1,
+  "confidence_threshold": 0.5,
+  "use_semantic_head": true,
+  "use_instance_head": true,
+  "use_presence_score": true,
+  "prompts": {
+    "names": [
+      "background",
+      "vegetation",
+      "building",
+      "road",
+      "vehicle"
+    ],
+    "num_classes": 5,
+    "num_prompts": 5
+  },
+  "run_time": "0206_0112"
 }
 ```

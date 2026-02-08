@@ -28,7 +28,6 @@ segmentor:
   # used to seperate background from foreground in final mask output.
   prob_threshold: 0.1
   use_presence_score: true
-  # Background index matches GT label 0
   bg_idx: 0
   # Set use_prompted_background=true because cls_vaihingen.txt includes "background"
   # as the first line (no need to inject a zero-logit background channel)

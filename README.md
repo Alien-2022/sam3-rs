@@ -179,8 +179,6 @@ result = model.predict_single('large_image.tif')
 
 ## Documentation
 
-- **[START_HERE.md](docs/START_HERE.md)** - Quick start guide
-- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** - Architecture details and design
 
 ## Design Principles
 
@@ -203,17 +201,6 @@ result = model.predict_single('large_image.tif')
 
 ## Citation
 
-If you use SAM3-RS, please cite:
-
-```bibtex
-@article{segearthov3,
-  title={SegEarth-OV3: Exploring SAM 3 for Open-Vocabulary Semantic Segmentation in Remote Sensing Images},
-  author={Li, Kaiyu and Zhang, Shengqi and Deng, Yupeng and Wang, Zhi and Meng, Deyu and Cao, Xiangyong},
-  journal={arXiv preprint arXiv:2512.08730},
-  year={2025}
-}
-
-```
 
 ## License
 

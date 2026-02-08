@@ -207,7 +207,9 @@ class Sam3Processor:
         #   - "masks": [inst_num, 1, original_height, original_width]
         #   - "boxes": [inst_num, 4]
         #   - "scores": [inst_num]
-        return self._forward_grounding(state)
+
+        result = self._forward_grounding(state)
+        return result
 
     @torch.inference_mode()
     def add_geometric_prompt(self, box: List, label: bool, state: Dict):

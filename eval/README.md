@@ -70,6 +70,7 @@ python core/sam3-rs/eval/run_eval.py \
 - **Potsdam**: 高分辨率遥感图像分割（6类）
 - **Vaihingen**: 高分辨率遥感图像分割（6类，与 Potsdam 类别相同）
 - **UAVid**: 无人机视频语义分割（8类，包含 moving car 和 static car）
+- **UDD5**: 遥感图像分割（5类，标签已预重映射）
 
 ## 指标
 - `mIoU` / `mAcc` / `aAcc`，流式混淆矩阵实现，内存占用低。

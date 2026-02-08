@@ -6,23 +6,22 @@ dataset:
   img_dir: Exp/img
   mask_dir: Exp/mask
   cls_file: cls_openearthmap.txt
-  ignore_index: 255
+  ignore_index: 0
   # OpenEarthMap dataset uses labels 1-8 for 8 classes (0 is no-data).
-  # We set reduce_zero_label=True to map GT labels 1-8 to 0-7, aligning with
-  # segmentor's output indices (0-7) derived from cls_openearthmap.txt.
-  # This ensures correct alignment:
-  #   - Segmentor output: 0=bareland, 1=grass, ..., 7=building
-  #   - GT mask (after reduce): 0=bareland, 1=grass, ..., 7=building
-  # Note: We do NOT include "background" in cls_openearthmap.txt because
-  # OpenEarthMap's background is represented as 0 (no-data) and should be
-  # ignored in metrics, not predicted as a foreground class.
-  reduce_zero_label: true
+  # We set reduce_zero_label=False to keep GT labels as-is:
+  #   - GT mask (original): 0=no-data, 1-8=valid classes
+  #   - GT mask (no reduce): 0=ignore, 1-8=valid classes
+  #   - Segmentor output: 0=background, 1-8=valid classes (injected by segmentor)
+  # This ensures direct alignment: GT [1-8] ↔ Pred [1-8]
+  # Note: cls_openearthmap.txt does NOT include "background" because OpenEarthMap has no semantic
+  # background class. The segmentor will inject a background channel automatically.
+  reduce_zero_label: false
   data_key: null
 
 dataloader:
   # OpenEarthMap images have different sizes (1000x1000, 1024x1024)
   # so we use a batch size of 1 to handle variable dimensions
-  batch_size: 1  
+  batch_size: 1
 
 segmentor:
   checkpoint_path: weights/sam3/sam3.pt
@@ -35,10 +34,13 @@ segmentor:
   # used to seperate background from foreground in final mask output.
   prob_threshold: 0.1
   use_presence_score: true
+  # Since cls_openearthmap.txt does NOT include "background", use_prompted_background=false
+  # The segmentor will inject a background channel and use prob_threshold to filter
+  # low-confidence predictions to background (index 0).
   bg_idx: 0
-  use_prompted_background: true
+  use_prompted_background: false
   weight_key: null
 
 output:
-  save_pred_dir: outputs/preds/openearthmap
+  # save_pred_dir: outputs/preds/openearthmap
   metrics_json: outputs/metrics/openearthmap.json

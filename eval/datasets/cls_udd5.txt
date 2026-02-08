@@ -1,0 +1,5 @@
+background
+vegetation
+building
+road
+vehicle

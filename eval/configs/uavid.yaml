@@ -3,8 +3,8 @@ base_config: ./base.yaml
 dataset:
   name: uavid
   data_root: data/UAVid
-  img_dir: Exp/img
-  mask_dir: Exp/mask
+  img_dir: pre_slice/img
+  mask_dir: pre_slice/mask
   cls_file: cls_uavid.txt
   ignore_index: 255
   # UAVid dataset uses labels 0-7 for 8 classes:
@@ -16,7 +16,7 @@ dataset:
   #   5 = moving car
   #   6 = static car
   #   7 = human
-  # Since cls_uavid.txt includes background as first line,
+  # Since cls_uavid.txt includes background as first line (required by SAM3-RS),
   # GT labels already align with segmentor output (no need for reduce_zero_label).
   reduce_zero_label: false
   data_key: null

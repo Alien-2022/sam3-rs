@@ -11,7 +11,7 @@ dataset:
   cls_file: cls_iSAID.txt
   ignore_index: 255
   # Our preprocessed iSAID dataset uses labels 0-15 for 16 classes (0=background, 1=large vehicle, ..., 15=storage tank).
-  # cls_iSAID.txt defines 15 classes with indices 0-14 (large vehicle to storage tank).
+  # cls_iSAID.txt defines 15 classes (large vehicle to storage tank).
   # We set reduce_zero_label=True to map GT labels:
   #   - Original GT: background=0, large vehicle=1, ..., storage tank=15
   #   - After reduce_zero_label: background=-1, large vehicle=0, ..., storage tank=14

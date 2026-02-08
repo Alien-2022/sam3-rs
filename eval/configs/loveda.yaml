@@ -1,9 +1,5 @@
 base_config: ./base.yaml
 
-dataloader:
-  num_workers: 4
-  batch_size: 6
-
 dataset:
   name: loveda
   data_root: data/LoveDA

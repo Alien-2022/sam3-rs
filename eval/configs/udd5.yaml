@@ -1,0 +1,51 @@
+base_config: ./base.yaml
+
+dataset:
+  name: udd5
+  data_root: data/UDD5
+  img_dir: Exp/img
+  mask_dir: Exp/mask
+  cls_file: cls_udd5.txt
+  ignore_index: 255
+  # UDD5 dataset uses labels 0-4 for 4 classes after remapping:
+  #   0 = other (clutter/background) - remapped from original 4
+  #   1 = vegetation - remapped from original 0
+  #   2 = building - remapped from original 1
+  #   3 = road - remapped from original 2
+  #   4 = vehicle - remapped from original 3
+  #
+  # Original GT Labels -> New Labels:
+  #   0(Vegetation) -> 1
+  #   1(Building)   -> 2
+  #   2(Road)       -> 3
+  #   3(Vehicle)    -> 4
+  #   4(Other)      -> 0 (background)
+  #
+  # Since cls_udd5.txt includes background (other) as first line (required by SAM3-RS),
+  # and GT masks have been pre-remapped to New Labels,
+  # no label shifting is needed (reduce_zero_label=False).
+  reduce_zero_label: false
+  data_key: null
+
+dataloader:
+  batch_size: 1
+
+segmentor:
+  checkpoint_path: weights/sam3/sam3.pt
+  bpe_path: bpe_simple_vocab_16e6.txt.gz
+  prompts_file: cls_udd5.txt
+  # confidence threshhold used to filter 200 queries output by decoder.
+  confidence_threshold: 0.5
+  # used to seperate background from foreground in final mask output.
+  prob_threshold: 0.1
+  use_presence_score: true
+  # Background index matches GT remapped label 0
+  bg_idx: 0
+  # Set use_prompted_background=true because cls_udd5.txt includes "other"
+  # (background/clutter) as first line (no need to inject a zero-logit background channel)
+  use_prompted_background: true
+  weight_key: null
+
+output:
+  # save_pred_dir: outputs/preds/udd5
+  metrics_json: outputs/metrics/udd5.json

@@ -78,6 +78,23 @@ UAVID = {
 }
 
 
+# UDD5 数据集颜色映射（使用 New Label 的官方 RGB 颜色）
+# GT 重映射标签 (New Label): 0: other, 1: vegetation, 2: building, 3: road, 4: vehicle
+# 原始 GT Labels -> New Labels:
+#   0(Vegetation) -> 1
+#   1(Building)   -> 2
+#   2(Road)       -> 3
+#   3(Vehicle)    -> 4
+#   4(Other)      -> 0 (background)
+UDD5 = {
+    0: {"name": "other", "color": [0, 0, 0]},               # #000000 (原始 4)
+    1: {"name": "vegetation", "color": [107, 142, 35]},       # #6B8E23 (原始 0)
+    2: {"name": "building", "color": [102, 102, 156]},          # #66669C (原始 1)
+    3: {"name": "road", "color": [128, 64, 128]},             # #804080 (原始 2)
+    4: {"name": "vehicle", "color": [0, 0, 142]},             # #00008E (原始 3)
+}
+
+
 # 注册表：支持的数据集颜色映射
 COLORMAPS = {
     "loveda": LOVEDA,
@@ -85,6 +102,7 @@ COLORMAPS = {
     "potsdam": POTSDAM,
     "vaihingen": VAIHINGEN,
     "uavid": UAVID,
+    "udd5": UDD5,
 }
 
 
