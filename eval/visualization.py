@@ -386,6 +386,7 @@ if __name__ == "__main__":
     python eval/visualization.py --gt data/LoveDA/Exp/mask/2522.png --pred outputs/preds/loveda/2522.png --output outputs/compare/2522.png --colormap loveda
     # LoveDA 批量
     python visualization.py --gt gt_dir/ --pred pred_dir/ --output out_dir/ --colormap loveda_pred
+    python eval/visualization.py --gt data/isAID/Exp/mask --pred outputs\preds\isAID --output outputs/compare --colormap isaid
     # 自定义数据集
     python visualization.py --gt gt.png --pred pred.png --output out.png --colormap custom --colormap-file custom.json
     """

@@ -17,6 +17,7 @@ from .potsdam import PotsdamDataset
 from .vaihingen import VaihingenDataset
 from .uavid import UAVidDataset
 from .udd5 import UDD5Dataset
+from .vdd import VDDDataset
 
 # Dataset registry: maps dataset names to dataset classes
 DATASET_REGISTRY = {
@@ -27,6 +28,7 @@ DATASET_REGISTRY = {
     "vaihingen": VaihingenDataset,
     "uavid": UAVidDataset,
     "udd5": UDD5Dataset,
+    "vdd": VDDDataset,
 }
 
 # Export registry for dynamic dataset loading

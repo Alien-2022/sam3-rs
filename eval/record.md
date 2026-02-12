@@ -202,6 +202,55 @@
   },
   "run_time": "0201_2318"
 }
+
+{
+  "mIoU": 0.5033575160877108,
+  "mAcc": 0.6596490983227313,
+  "aAcc": 0.7221828175017955,
+  "per_class_iou": {
+    "large vehicle": 0.8609298752391901,
+    "small vehicle": 0.5840639108659402,
+    "harbor": 0.36203700548227297,
+    "ship": 0.0408861858530972,
+    "ground track field": 0.2032949056674953,
+    "soccerball field": 0.1170190332447974,
+    "baseball diamond": 0.9907624887683841,
+    "swimming pool": 0.4173665058731604,
+    "roundabout": 0.39659345111523137,
+    "bridge": 0.3896192736241029,
+    "tennis court": 0.19052232307814462,
+    "basketball court": 0.9834558356590863,
+    "plane": 0.16242787518906493,
+    "helicopter": 0.9865217015115794
+  },
+  "prob_threshold": 0.5,
+  "confidence_threshold": 0.4,
+  "use_semantic_head": true,
+  "use_instance_head": true,
+  "use_presence_score": true,
+  "prompts": {
+    "names": [
+      "large vehicle",
+      "small vehicle",
+      "harbor",
+      "ship",
+      "ground track field",
+      "soccerball field",
+      "baseball diamond",
+      "swimming pool",
+      "roundabout",
+      "bridge",
+      "tennis court",
+      "basketball court",
+      "plane",
+      "helicopter",
+      "storage tank"
+    ],
+    "num_classes": 15,
+    "num_prompts": 15
+  },
+  "run_time": "0212_0118"
+}
 ```
 
 ### Potsdam

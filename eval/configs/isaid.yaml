@@ -2,6 +2,7 @@ base_config: ./base.yaml
 
 dataloader:
   num_workers: 4
+  batch_size: 1
 
 dataset:
   name: isaid
@@ -9,7 +10,7 @@ dataset:
   img_dir: Exp/img
   mask_dir: Exp/mask
   cls_file: cls_iSAID.txt
-  ignore_index: 255
+  ignore_index: 0
   # Our preprocessed iSAID dataset uses labels 0-15 for 16 classes (0=background, 1=large vehicle, ..., 15=storage tank).
   # cls_iSAID.txt defines 15 classes (large vehicle to storage tank).
   # We set reduce_zero_label=True to map GT labels:
@@ -21,7 +22,7 @@ dataset:
   #   - GT mask (after reduce): 0=large vehicle, 1=small vehicle, ..., 14=storage tank
   # Note: We do NOT include "background" in cls_iSAID.txt because iSAID's background
   # should be ignored in metrics, not predicted as a foreground class.
-  reduce_zero_label: true
+  reduce_zero_label: false
   data_key: null
 
 segmentor:
@@ -38,7 +39,7 @@ segmentor:
   # during metric calculation, avoiding false positives.
   # Note: Since reduce_zero_label=True maps GT background(0) to ignore_index(255),
   # we should also assign low-confidence predictions to 255 to align with GT.
-  bg_idx: 255
+  bg_idx: 0
   # Set use_prompted_background=false because cls_iSAID.txt does NOT include "background"
   # (need to inject a zero-logit background channel before argmax)
   use_prompted_background: false

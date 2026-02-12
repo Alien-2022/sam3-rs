@@ -1,0 +1,47 @@
+base_config: ./base.yaml
+
+dataloader:
+  num_workers: 4
+  batch_size: 1
+
+dataset:
+  name: vdd
+  data_root: data/VDD
+  img_dir: Exp/img
+  mask_dir: Exp/mask
+  cls_file: cls_vdd.txt
+  ignore_index: 255
+  # VDD dataset uses labels 0-6 for 7 classes:
+  #   0 = other (clutter/background)
+  #   1 = wall
+  #   2 = road
+  #   3 = vegetation
+  #   4 = vehicle
+  #   5 = roof
+  #   6 = water
+  #
+  # Since cls_vdd.txt includes background (other) as first line (required by SAM3-RS),
+  # and GT masks use labels 0-6 directly,
+  # no label shifting is needed (reduce_zero_label=False).
+  reduce_zero_label: false
+  data_key: null
+
+segmentor:
+  checkpoint_path: weights/sam3/sam3.pt
+  bpe_path: bpe_simple_vocab_16e6.txt.gz
+  prompts_file: cls_vdd.txt
+  # confidence threshhold used to filter 200 queries output by decoder.
+  confidence_threshold: 0.5
+  # used to seperate background from foreground in final mask output.
+  prob_threshold: 0.1
+  use_presence_score: true
+  # Background index matches GT label 0
+  bg_idx: 0
+  # Set use_prompted_background=true because cls_vdd.txt includes "other"
+  # (background/clutter) as first line (no need to inject a zero-logit background channel)
+  use_prompted_background: true
+  weight_key: null
+
+output:
+  # save_pred_dir: outputs/preds/vdd
+  metrics_json: outputs/metrics/vdd.json

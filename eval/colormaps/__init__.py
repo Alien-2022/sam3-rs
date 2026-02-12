@@ -95,6 +95,44 @@ UDD5 = {
 }
 
 
+# VDD 数据集颜色映射（参考 UDD5 调色板）
+# GT 原始标签: 0: other, 1: wall, 2: road, 3: vegetation, 4: vehicle, 5: roof, 6: water
+VDD = {
+    0: {"name": "other", "color": [0, 0, 0]},               # #000000 (background/clutter)
+    1: {"name": "wall", "color": [128, 0, 0]},             # #800000 (参考 building)
+    2: {"name": "road", "color": [128, 64, 128]},           # #804080 (参考 road)
+    3: {"name": "vegetation", "color": [107, 142, 35]},       # #6B8E23 (参考 vegetation)
+    4: {"name": "vehicle", "color": [0, 0, 142]},             # #00008E (参考 vehicle)
+    5: {"name": "roof", "color": [102, 102, 156]},          # #66669C (参考 building/brown)
+    6: {"name": "water", "color": [0, 69, 255]},            # #0045FF (参考 water)
+}
+
+
+# iSAID 数据集颜色映射（官方颜色定义）
+# GT 原始标签: 0: background, 1: large vehicle, 2: small vehicle, 3: harbor, 4: ship,
+#              5: ground track field, 6: soccerball field, 7: baseball diamond, 8: swimming pool,
+#              9: roundabout, 10: bridge, 11: tennis court, 12: basketball court, 13: plane,
+#              14: helicopter, 15: storage tank
+ISAID = {
+    0: {"name": "background", "color": [0, 0, 0]},           # #000000
+    1: {"name": "large vehicle", "color": [0, 127, 127]},     # #007F7F
+    2: {"name": "small vehicle", "color": [0, 0, 127]},       # #00007F
+    3: {"name": "harbor", "color": [0, 100, 155]},           # #00649B
+    4: {"name": "ship", "color": [0, 0, 63]},               # #00003F
+    5: {"name": "ground track field", "color": [0, 63, 255]},   # #003FFF
+    6: {"name": "soccerball field", "color": [0, 127, 191]},  # #007FBF
+    7: {"name": "baseball diamond", "color": [0, 63, 0]},       # #003F00
+    8: {"name": "swimming pool", "color": [0, 0, 255]},        # #0000FF
+    9: {"name": "roundabout", "color": [0, 191, 127]},        # #00BF7F
+    10: {"name": "bridge", "color": [0, 127, 63]},           # #007F3F
+    11: {"name": "tennis court", "color": [0, 63, 127]},        # #003F7F
+    12: {"name": "basketball court", "color": [0, 63, 191]},   # #003FBF
+    13: {"name": "plane", "color": [0, 127, 255]},           # #007FFF
+    14: {"name": "helicopter", "color": [0, 0, 191]},         # #0000BF
+    15: {"name": "storage tank", "color": [0, 63, 63]},        # #003F3F
+}
+
+
 # 注册表：支持的数据集颜色映射
 COLORMAPS = {
     "loveda": LOVEDA,
@@ -103,6 +141,8 @@ COLORMAPS = {
     "vaihingen": VAIHINGEN,
     "uavid": UAVID,
     "udd5": UDD5,
+    "isaid": ISAID,
+    "vdd": VDD,
 }
 
 
