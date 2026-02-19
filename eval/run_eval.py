@@ -180,8 +180,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-batch", action="store_false", dest="use_batch", help="Use serial predict_single inference"
     )
+    parser.set_defaults(use_batch=True)
     parser.add_argument(
         "--debug-log", default=None, help="Path to debug log file for memory profiling"
+    )
+    parser.add_argument(
+        "--analyze-presence-score", action="store_true",
+        help="Analyze and print presence score statistics"
     )
     return parser.parse_args()
 
@@ -201,6 +206,12 @@ def main() -> None:
     if args.debug_log:
         cfg.setdefault("segmentor", {})["debug_memory"] = True
         cfg.setdefault("segmentor", {})["debug_log_file"] = args.debug_log
+
+
+    # Enable presence score analysis if specified in config or command line
+    analyze_ps = args.analyze_presence_score or cfg.get("segmentor", {}).get("analyze_presence_score", False)
+    if analyze_ps:
+        cfg.setdefault("segmentor", {})["analyze_presence_score"] = True
 
     dataset_cfg = cfg["dataset"]
 
@@ -307,8 +318,8 @@ def main() -> None:
             print(f"[eval] {processed}/{total_imgs} images done | Data: {t_data/(processed/8+1e-6):.3f}s/b | Infer: {t_infer/processed:.3f}s/i | Eval: {t_eval/processed:.3f}s/i", end="\r")
         t_eval += (time.time() - t_eval_start)
 
-        # if processed >= 100:
-        #     break
+        if processed >= 100:
+            break
         t_start_loop = time.time()
 
         # 定期清理 GPU 缓存 - 每 5 个 batch 清理一次，避免频繁清理影响性能
@@ -320,12 +331,20 @@ def main() -> None:
     # Ensure the final progress line ends with newline
     if total_imgs > 0:
         print()
-    
+
+    # Print presence score statistics if enabled
+    if args.analyze_presence_score:
+        from segmentor_lib.analyzers import PresenceScoreAnalyzer
+        analyzer = segmentor.engine.get_analyzer(PresenceScoreAnalyzer)
+        if analyzer:
+            analyzer.report()
+
     print(f"\n--- Timing Summary (per image) ---")
     print(f"Data loading: {t_data / processed:.3f}s")
     print(f"Inference:    {t_infer / processed:.3f}s")
     print(f"Eval/Save:     {t_eval / processed:.3f}s")
     print(f"Total:        {(t_data + t_infer + t_eval) / processed:.3f}s\n")
+
 
     # Ensure the final progress line ends with newline
     if total_imgs > 0:

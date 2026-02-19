@@ -30,6 +30,7 @@ segmentor:
   # used to seperate background from foreground in final mask output.
   prob_threshold: 0.5
   use_presence_score: true
+  analyze_presence_score: true
   bg_idx: 0
   use_prompted_background: true
   # Optional: use workspace NAS registry for checkpoint
