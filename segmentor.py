@@ -54,8 +54,8 @@ class InferenceConfig:
     # - "after_fusion" (default): apply to fused result after dual-head fusion
     # - "before_fusion": apply to semantic head separately before fusion with instance head
     # Note: instance head already includes presence_score in SAM3's internal computation
-    # presence_score_mode: str = "after_fusion"
-    presence_score_mode: str = "before_fusion"
+    presence_score_mode: str = "after_fusion"
+    # presence_score_mode: str = "before_fusion"
 
     # Semantic enhancement in text space
     # If True: compute average embedding for synonyms within each class before inference
@@ -226,6 +226,7 @@ class SAM3RSSegmentor:
         image_name = os.path.basename(image_path)
 
         # Choose inference mode
+        per_class_results = None
         if self.config.slide_crop_size > 0 and (
             self.config.slide_crop_size < image.width
             or self.config.slide_crop_size < image.height
@@ -236,7 +237,7 @@ class SAM3RSSegmentor:
             )
         else:
             # Single view inference
-            seg_logits, _, semantic_logits_only, instance_logits_only = self._inference_single_view(
+            seg_logits, per_class_results, semantic_logits_only, instance_logits_only = self._inference_single_view(
                 image, detailed=detailed, image_name=image_name
             )
 
@@ -251,6 +252,12 @@ class SAM3RSSegmentor:
 
         # Get final prediction (argmax)
         bg_idx = 0 if self.config.bg_idx is None else self.config.bg_idx
+
+        # If background is in prompts but we want to exclude it from metric,
+        # set its logits to 0 so argmax won't select it
+        if self.config.use_prompted_background:
+            seg_logits[bg_idx] = 0
+
         seg_pred = logits_to_pred(seg_logits, self.config.use_prompted_background, self.config.prob_threshold, bg_idx)
 
         # Fuse individual head logits
@@ -323,6 +330,12 @@ class SAM3RSSegmentor:
 
         # 2. Get final prediction (argmax)
         bg_idx = 0 if self.config.bg_idx is None else self.config.bg_idx
+
+        # If background is in prompts but we want to exclude it from metric,
+        # set its logits to 0 so argmax won't select it
+        if self.config.use_prompted_background:
+            seg_logits = seg_logits.clone()
+            seg_logits[:, bg_idx] = 0
 
         # Unify prediction logic across batch
         # seg_logits: [B, num_classes, H, W]

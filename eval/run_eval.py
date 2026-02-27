@@ -139,31 +139,46 @@ def build_segmentor(seg_cfg: Dict[str, Any]) -> SAM3RSSegmentor:
 
 def save_prediction(pred_np: np.ndarray, save_dir: str, image_path: str,
                     gt_mask: Optional[np.ndarray] = None,
-                    reduce_zero_label: bool = True) -> None:
+                    reduce_zero_label: bool = True,
+                    ignore_index: int = 255) -> None:
     """
     保存预测 mask 到磁盘。
 
     Args:
-        pred_np: 预测的 mask 数组
+        pred_np: 预测的 mask 数组（segmentor输出，已reduce）
         save_dir: 保存预测结果的目录
         image_path: 原始图像路径（用于文件名）
         gt_mask: Ground truth mask（可选，用于掩盖 no-data 区域）
+                 注意：如果reduce_zero_label=True，gt_mask已经被reduce过了
         reduce_zero_label: 是否需要将预测结果 +1 以恢复原始标签
                            LoveDA 为 True，OpenEarthMap 为 False
+        ignore_index: 忽略的标签值（no-data会被设为这个值）
     """
     os.makedirs(save_dir, exist_ok=True)
     base = os.path.splitext(os.path.basename(image_path))[0]
     out_path = os.path.join(save_dir, f"{base}.png")
-    # 这里得到mask是标签值向左移一位的，且不包含no-data类别:
+
+    # segmentor输出格式（reduce后）:
     # [background:0, building:1, road:2, water:3, barren:4, forest:5, agriculture:6]
-    # 但 gt mask 包含no-data类别，且标签值未移动
-    # 所以为对齐需要加1恢复原标签值
+    #
+    # 如果需要保存为原始标签格式（与原始GT对齐），需要：
+    # 1. 将预测结果 +1: [0-6] -> [1-7]（1=background, 2=building, ..., 7=agriculture）
+    # 2. 将GT中的no-data区域（值为ignore_index=255）应用到预测中
+
+    # 先备份原始预测（未还原）
+    pred_original = pred_np.copy()
+
     if reduce_zero_label:
-        pred_np += 1
-    # 将 GT 中 no-data 区域（值为0）应用到预测结果中
+        # 还原为原始标签格式
+        pred_np += 1  # [0-6] -> [1-7]
+
+    # 将 GT 中 no-data 区域（值为ignore_index）应用到预测结果中
     if gt_mask is not None:
         gt_np = gt_mask.cpu().numpy() if torch.is_tensor(gt_mask) else gt_mask
-        pred_np[gt_np == 0] = 0
+        # 注意：如果reduce_zero_label=True，gt_mask已经是reduce过的格式
+        # no-data被设为ignore_index(255)，background为0，其他类为1-6
+        pred_np[gt_np == ignore_index] = 0  # 将no-data区域设为0
+
     Image.fromarray(pred_np).save(out_path)
 
 def parse_args() -> argparse.Namespace:
@@ -181,13 +196,6 @@ def parse_args() -> argparse.Namespace:
         "--no-batch", action="store_false", dest="use_batch", help="Use serial predict_single inference"
     )
     parser.set_defaults(use_batch=True)
-    parser.add_argument(
-        "--debug-log", default=None, help="Path to debug log file for memory profiling"
-    )
-    parser.add_argument(
-        "--analyze-presence-score", action="store_true",
-        help="Analyze and print presence score statistics"
-    )
     return parser.parse_args()
 
 
@@ -201,17 +209,6 @@ def main() -> None:
         cfg.setdefault("segmentor", {})["device"] = args.device
     if args.prob_threshold is not None:
         cfg.setdefault("segmentor", {})["prob_threshold"] = args.prob_threshold
-
-    # Enable debug logging if specified
-    if args.debug_log:
-        cfg.setdefault("segmentor", {})["debug_memory"] = True
-        cfg.setdefault("segmentor", {})["debug_log_file"] = args.debug_log
-
-
-    # Enable presence score analysis if specified in config or command line
-    analyze_ps = args.analyze_presence_score or cfg.get("segmentor", {}).get("analyze_presence_score", False)
-    if analyze_ps:
-        cfg.setdefault("segmentor", {})["analyze_presence_score"] = True
 
     dataset_cfg = cfg["dataset"]
 
@@ -310,8 +307,10 @@ def main() -> None:
 
             metric.update(pred_np, gt_np)
             if save_pred_dir is not None:
+                ignore_index = dataset_cfg.get("ignore_index", 255)
                 save_prediction(pred_np, save_pred_dir, img_path, gt_mask,
-                               reduce_zero_label=dataset_cfg.get("reduce_zero_label", True))
+                               reduce_zero_label=dataset_cfg.get("reduce_zero_label", True),
+                               ignore_index=ignore_index)
 
             processed += 1
             # Average per image display
@@ -332,8 +331,9 @@ def main() -> None:
     if total_imgs > 0:
         print()
 
-    # Print presence score statistics if enabled
-    if args.analyze_presence_score:
+    # Print presence score statistics if enabled in config
+    analyze_ps = cfg.get("segmentor", {}).get("analyze_presence_score", False)
+    if analyze_ps:
         from segmentor_lib.analyzers import PresenceScoreAnalyzer
         analyzer = segmentor.engine.get_analyzer(PresenceScoreAnalyzer)
         if analyzer:

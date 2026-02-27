@@ -46,7 +46,6 @@ class SegmentationMetric:
             label = label[mask_bg]
             pred = pred[mask_bg]
 
-
         # Validate that labels and preds are in expected range
         # For use_prompted_background=False: valid labels/preds are [1, num_classes]
         # For use_prompted_background=True: valid labels/preds are [0, num_classes-1]

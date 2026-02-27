@@ -189,7 +189,7 @@ class InferenceEngine:
 
                     # Apply presence score to semantic head if enabled
                     if self.config.use_presence_score and self.config.presence_score_mode == "before_fusion":
-                        presence_score = output.get("presence_score", 1.0)
+                        presence_score = output.get("presence_score", 0)
                         semantic_logits = semantic_logits * presence_score
 
                     # Fusion: take max of instance and semantic predictions
@@ -198,7 +198,7 @@ class InferenceEngine:
 
                 # 3. Presence score filtering (after fusion mode)
                 if self.config.use_presence_score and self.config.presence_score_mode == "after_fusion":
-                    presence_score = output.get("presence_score", 1.0)
+                    presence_score = output.get("presence_score", 0)
                     current_logits = current_logits * presence_score
 
                 seg_logits[prompt_idx] = current_logits

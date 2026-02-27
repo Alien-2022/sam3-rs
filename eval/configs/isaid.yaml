@@ -25,6 +25,10 @@ dataset:
   reduce_zero_label: false
   data_key: null
 
+  use_semantic_enhancement: false
+  analyze_presence_score: false
+  presence_score_mode: "before_fusion"
+
 segmentor:
   checkpoint_path: weights/sam3/sam3.pt
   bpe_path: bpe_simple_vocab_16e6.txt.gz

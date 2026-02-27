@@ -46,6 +46,11 @@ segmentor:
   use_prompted_background: true
   weight_key: null
 
+  
+  use_semantic_enhancement: false
+  analyze_presence_score: true
+  presence_score_mode: "after_fusion"
+
 output:
   # save_pred_dir: outputs/preds/udd5
   metrics_json: outputs/metrics/udd5.json
