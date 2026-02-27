@@ -12,7 +12,7 @@ class SlidingWindowInference:
         """
         Args:
             inference_func: Function that takes (image, detailed, image_name) and returns
-                          (seg_logits, per_class_results, semantic_logits, instance_logits)
+                          (seg_logits, per_class_results, semantic_logits, instance_logits, adaptive_prob_thresholds)
             crop_size: Size of sliding window crop
             stride: Stride for sliding window
             device: torch.device
@@ -23,7 +23,7 @@ class SlidingWindowInference:
         self.device = device
 
     def __call__(self, image: Image.Image, detailed: bool = False,
-                 image_name: str = "unknown") -> Tuple[torch.Tensor, Dict, Optional[torch.Tensor], Optional[torch.Tensor]]:
+                 image_name: str = "unknown") -> Tuple[torch.Tensor, Dict, Optional[torch.Tensor], Optional[torch.Tensor], Optional[Dict]]:
         """
         Run sliding window inference on image.
 
@@ -33,7 +33,7 @@ class SlidingWindowInference:
             image_name: Image identifier
 
         Returns:
-            Tuple of (seg_logits, per_class_results, semantic_logits, instance_logits)
+            Tuple of (seg_logits, per_class_results, semantic_logits, instance_logits, adaptive_prob_thresholds)
         """
         w, h = image.size
 
@@ -49,6 +49,7 @@ class SlidingWindowInference:
         per_class_results = {}
 
         # Process each crop
+        adaptive_prob_thresholds_list = []
         for crop_y in range(num_crops_y):
             for crop_x in range(num_crops_x):
                 # Calculate crop boundaries
@@ -61,9 +62,13 @@ class SlidingWindowInference:
                 crop = image.crop((x1, y1, x2, y2))
 
                 # Run inference on crop
-                crop_seg_logits, crop_per_class, crop_semantic, crop_instance = self.inference_func(
+                crop_seg_logits, crop_per_class, crop_semantic, crop_instance, crop_adaptive = self.inference_func(
                     crop, detailed=detailed, image_name=f"{image_name}_crop_{crop_y}_{crop_x}"
                 )
+
+                # Collect adaptive thresholds from first crop (they should be similar across crops)
+                if crop_adaptive is not None and not adaptive_prob_thresholds_list:
+                    adaptive_prob_thresholds_list.append(crop_adaptive)
 
                 # Resize crop result to match original crop size (in case padding was used)
                 if crop_seg_logits.shape[-2:] != (y2 - y1, x2 - x1):
@@ -105,4 +110,7 @@ class SlidingWindowInference:
         semantic_logits = semantic_logits_sum / count_map.unsqueeze(0) if semantic_logits_sum is not None else None
         instance_logits = instance_logits_sum / count_map.unsqueeze(0) if instance_logits_sum is not None else None
 
-        return seg_logits, per_class_results, semantic_logits, instance_logits
+        # Return adaptive thresholds from first crop (or None if not available)
+        adaptive_prob_thresholds = adaptive_prob_thresholds_list[0] if adaptive_prob_thresholds_list else None
+
+        return seg_logits, per_class_results, semantic_logits, instance_logits, adaptive_prob_thresholds

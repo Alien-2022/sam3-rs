@@ -37,8 +37,34 @@ segmentor:
   weight_key: null
 
   use_semantic_enhancement: false
-  analyze_presence_score: false
+  analyze_presence_score: true
   presence_score_mode: "after_fusion"
+
+  adaptive_threshold_strategy: "presence"
+  # adaptive_threshold_strategy: "class_specific"
+  # adaptive_threshold_strategy: "hybrid"
+   # Class-specific thresholds
+    # LoveDA class IDs: 0=background, 1=building, 2=road, 3=water,
+    #                   4=barren, 5=forest, 6=agricultural
+  # class_thresholds: {
+  #     # Road: linear features, use lower threshold to capture thin roads
+  #     2: {'confidence_threshold': 0.7, 'prob_threshold': 0.5},
+
+  #     # Building: regular shapes, can use higher threshold
+  #     1: {'confidence_threshold': 0.7, 'prob_threshold': 0.5},
+
+  #     # Water: high contrast, use moderate threshold
+  #     3: {'confidence_threshold': 0.7, 'prob_threshold': 0.5},
+
+  #     # Forest: irregular, use lower threshold
+  #     5: {'confidence_threshold': 0.1, 'prob_threshold': 0.7},
+
+  #     # Barren: heterogeneous, use lower threshold
+  #     4: {'confidence_threshold': 0.7, 'prob_threshold': 0.5},
+
+  #     # Agricultural: medium difficulty, use base threshold
+  #     6: {'confidence_threshold': 0.7, 'prob_threshold': 0.5},
+  # }
 
 
 output:

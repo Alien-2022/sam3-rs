@@ -62,6 +62,19 @@ class InferenceConfig:
     # If False: use all synonyms separately and fuse results (original behavior)
     use_semantic_enhancement: bool = False
 
+    # Adaptive threshold strategy
+    # - None (default): use fixed thresholds (confidence_threshold, prob_threshold)
+    # - 'presence': adjust thresholds based on presence score
+    # - 'class_specific': use class-specific base thresholds
+    # - 'hybrid': combine class-specific + presence score adaptation
+    # - 'image_feature': adjust based on image feature complexity
+    adaptive_threshold_strategy: Optional[str] = None
+
+    # Class-specific threshold configurations (used with 'class_specific' or 'hybrid' strategies)
+    # Format: {class_id: {'confidence_threshold': float, 'prob_threshold': float}}
+    # Example: {1: {'confidence_threshold': 0.15, 'prob_threshold': 0.03}}
+    class_thresholds: Optional[Dict[int, Dict[str, float]]] = None
+
     # Large image handling
     slide_crop_size: int = 0  # 0 means no sliding
     slide_stride: int = 512
@@ -227,17 +240,18 @@ class SAM3RSSegmentor:
 
         # Choose inference mode
         per_class_results = None
+        adaptive_prob_thresholds = None
         if self.config.slide_crop_size > 0 and (
             self.config.slide_crop_size < image.width
             or self.config.slide_crop_size < image.height
         ):
             # Use sliding window for large images
-            seg_logits, per_class_results, semantic_logits_only, instance_logits_only = self._sliding_window_inference(
+            seg_logits, per_class_results, semantic_logits_only, instance_logits_only, adaptive_prob_thresholds = self._sliding_window_inference(
                 image, detailed=detailed, image_name=image_name
             )
         else:
             # Single view inference
-            seg_logits, per_class_results, semantic_logits_only, instance_logits_only = self._inference_single_view(
+            seg_logits, per_class_results, semantic_logits_only, instance_logits_only, adaptive_prob_thresholds = self._inference_single_view(
                 image, detailed=detailed, image_name=image_name
             )
 
@@ -258,7 +272,15 @@ class SAM3RSSegmentor:
         if self.config.use_prompted_background:
             seg_logits[bg_idx] = 0
 
-        seg_pred = logits_to_pred(seg_logits, self.config.use_prompted_background, self.config.prob_threshold, bg_idx)
+        # Use adaptive prob_threshold if available
+        if adaptive_prob_thresholds is not None:
+            from segmentor_lib.postprocess import logits_to_pred_adaptive
+            seg_pred = logits_to_pred_adaptive(
+                seg_logits, self.config.use_prompted_background,
+                adaptive_prob_thresholds, self.config.prob_threshold, bg_idx
+            )
+        else:
+            seg_pred = logits_to_pred(seg_logits, self.config.use_prompted_background, self.config.prob_threshold, bg_idx)
 
         # Fuse individual head logits
         semantic_logits = None
@@ -306,7 +328,7 @@ class SAM3RSSegmentor:
         image_names = [os.path.basename(p) for p in image_paths]
         # Batch reference for sliding windows is not currently supported.
         try:
-            seg_logits, _, _, _ = self._inference_batch_view(
+            seg_logits, _, _, _, adaptive_prob_thresholds = self._inference_batch_view(
                 images, detailed=detailed, image_names=image_names
             )
         finally:
@@ -350,8 +372,19 @@ class SAM3RSSegmentor:
         else:
             seg_pred = torch.argmax(seg_logits, dim=1)
 
-        max_vals = seg_logits.max(1)[0]
-        seg_pred[max_vals < self.config.prob_threshold] = bg_idx
+        # Apply prob_threshold filtering (adaptive or fixed)
+        if adaptive_prob_thresholds is not None:
+            # Use per-class adaptive thresholds
+            for class_id in range(self.num_classes):
+                threshold = adaptive_prob_thresholds.get(class_id, self.config.prob_threshold)
+                class_logits = seg_logits[:, class_id]
+                # If argmax selected this class but logits are below threshold, assign to background
+                mask = (seg_pred == class_id) & (class_logits < threshold)
+                seg_pred[mask] = bg_idx
+        else:
+            # Use fixed threshold for all classes
+            max_vals = seg_logits.max(1)[0]
+            seg_pred[max_vals < self.config.prob_threshold] = bg_idx
 
         # 3. Package results
         for b in range(batch_size):
