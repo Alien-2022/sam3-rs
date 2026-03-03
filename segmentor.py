@@ -181,6 +181,10 @@ class SAM3RSSegmentor:
                 self.processor, self.prompts, self.num_classes, self.device
             )
             self.num_prompts = len(self.prompts["names"])
+            # Pre-compute text features for the selected representative words
+            self.text_features_cache = precompute_text_features(
+                self.processor, self.prompts, self.device, self.num_prompts
+            )
         elif enhancement_mode == 'avg_embedding':
             print("Using semantic enhancement: average embedding mode")
             self.prompts = apply_semantic_enhancement_with_avg_embedding(
