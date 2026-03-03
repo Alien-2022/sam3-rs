@@ -411,27 +411,32 @@ def apply_semantic_enhancement_with_avg_embedding(
                 main_embedding = stacked_pooled[0]
                 other_embeddings = stacked_pooled[1:]
 
-                # Compute cosine similarity
-                other_sims = F.cosine_similarity(other_embeddings, main_embedding.unsqueeze(0))
-
-                # Main synonym always has similarity 1.0
-                sims = torch.cat([torch.tensor([1.0], device=device), other_sims])
+                # Compute cosine similarity (handle case with no other synonyms)
+                if other_embeddings.shape[0] > 0:
+                    other_sims = F.cosine_similarity(other_embeddings, main_embedding.unsqueeze(0))
+                    # Main synonym always has similarity 1.0
+                    sims = torch.cat([torch.tensor([1.0], device=device), other_sims])
+                else:
+                    sims = torch.tensor([1.0], device=device)
 
                 # Filter: keep main synonym + top-K others above threshold
-                other_indices = list(range(1, n_original))
+                if other_embeddings.shape[0] > 0:
+                    other_indices = list(range(1, n_original))
 
-                # Determine how many others to keep
-                n_others_above = (other_sims >= sim_threshold).sum().item()
-                n_others_needed = min_synonyms - 1
+                    # Determine how many others to keep
+                    n_others_above = (other_sims >= sim_threshold).sum().item()
+                    n_others_needed = min_synonyms - 1
 
-                if n_others_above >= n_others_needed:
-                    keep_other_indices = [i for i, sim in zip(other_indices, other_sims) if sim >= sim_threshold]
+                    if n_others_above >= n_others_needed:
+                        keep_other_indices = [i for i, sim in zip(other_indices, other_sims) if sim >= sim_threshold]
+                    else:
+                        top_k = min(n_others_needed, n_original - 1)
+                        topk_other_indices = torch.argsort(other_sims, descending=True)[:top_k].tolist()
+                        keep_other_indices = [other_indices[i] for i in topk_other_indices]
+
+                    keep_indices = [0] + keep_other_indices
                 else:
-                    top_k = min(n_others_needed, n_original - 1)
-                    topk_other_indices = torch.argsort(other_sims, descending=True)[:top_k].tolist()
-                    keep_other_indices = [other_indices[i] for i in topk_other_indices]
-
-                keep_indices = [0] + keep_other_indices
+                    keep_indices = [0]
                 keep_indices = sorted(keep_indices)
 
                 # Filter embeddings
