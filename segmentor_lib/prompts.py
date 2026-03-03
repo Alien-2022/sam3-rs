@@ -413,7 +413,9 @@ def apply_semantic_enhancement_with_avg_embedding(
 
                 # Compute cosine similarity (handle case with no other synonyms)
                 if other_embeddings.shape[0] > 0:
-                    other_sims = F.cosine_similarity(other_embeddings, main_embedding.unsqueeze(0))
+                    # Cosine similarity: (A · B) / (||A|| * ||B||)
+                    # Since embeddings are L2 normalized, ||A|| = ||B|| = 1, so it's just dot product
+                    other_sims = (other_embeddings * main_embedding).sum(dim=-1)
                     # Main synonym always has similarity 1.0
                     sims = torch.cat([torch.tensor([1.0], device=device), other_sims])
                 else:
