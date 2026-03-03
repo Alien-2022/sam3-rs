@@ -41,6 +41,10 @@ segmentor:
   use_prompted_background: false
   weight_key: null
 
+  use_semantic_enhancement: true
+  analyze_presence_score: false
+  presence_score_mode: "after_fusion"
+
 output:
   # save_pred_dir: outputs/preds/openearthmap
   metrics_json: outputs/metrics/openearthmap.json

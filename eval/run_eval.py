@@ -317,8 +317,8 @@ def main() -> None:
             print(f"[eval] {processed}/{total_imgs} images done | Data: {t_data/(processed/8+1e-6):.3f}s/b | Infer: {t_infer/processed:.3f}s/i | Eval: {t_eval/processed:.3f}s/i", end="\r")
         t_eval += (time.time() - t_eval_start)
 
-        # if processed >= 100:
-        #     break
+        if processed >= 10:
+            break
         t_start_loop = time.time()
 
         # 定期清理 GPU 缓存 - 每 5 个 batch 清理一次，避免频繁清理影响性能
@@ -354,13 +354,38 @@ def main() -> None:
     per_class_iou = metric.per_class_iou()
     scores_with_detail = dict(scores)
 
-    # When use_prompted_background=False, confusion matrix has an extra row (index 0)
-    # that corresponds to injected background channel (GT has no such class, so row 0 is empty).
-    # We skip this row and match dataset.classes to per_class_iou[1:].
+    # When use_prompted_background=False, confusion matrix indices [0, num_classes-1]
+    # correspond to GT labels [1, num_classes] (no semantic background in GT).
+    # The segmentor injects a background channel (index 0) but it's filtered out
+    # in metric._fast_hist() before indexing confusion matrix.
+    # So per_class_iou indices directly map to dataset.classes.
     if not use_prompted_background:
-        per_class_iou_for_classes = per_class_iou[1:]
+        per_class_iou_for_classes = per_class_iou
     else:
         per_class_iou_for_classes = per_class_iou
+
+    # Debug: print lengths to check for mismatch
+    print(f"Debug: dataset.classes = {dataset.classes}")
+    print(f"Debug: len(dataset.classes) = {len(dataset.classes)}")
+    print(f"Debug: metric.num_classes = {metric.num_classes}")
+    print(f"Debug: per_class_iou_for_classes shape = {per_class_iou_for_classes.shape}")
+    print(f"Debug: per_class_iou full shape = {per_class_iou.shape}")
+    print(f"Debug: per_class_iou = {per_class_iou}")
+    print(f"Debug: confusion_matrix shape = {metric.confusion_matrix.shape}")
+    print(f"Debug: confusion_matrix diagonal (TP per class) = {np.diag(metric.confusion_matrix)}")
+    print(f"Debug: confusion_matrix row sums (GT pixels per class) = {metric.confusion_matrix.sum(axis=1)}")
+    print(f"Debug: confusion_matrix col sums (Pred pixels per class) = {metric.confusion_matrix.sum(axis=0)}")
+    print(f"Debug: IoU calculation check:")
+    for i, cls_name in enumerate(dataset.classes):
+        tp = metric.confusion_matrix[i, i]
+        fp = metric.confusion_matrix[:, i].sum() - tp
+        fn = metric.confusion_matrix[i, :].sum() - tp
+        iou_calc = tp / (tp + fp + fn + 1e-10)
+        print(f"  {i}: {cls_name[:30]:30s} TP={tp:7d} FP={fp:7d} FN={fn:7d} IoU={iou_calc:.4f} vs {per_class_iou[i]:.4f}")
+
+
+
+
 
     scores_with_detail["per_class_iou"] = {
         cls_name: float(iou) for cls_name, iou in zip(dataset.classes, per_class_iou_for_classes)

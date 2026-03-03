@@ -98,7 +98,7 @@ def apply_semantic_enhancement(
     prompts: Dict,
     num_classes: int,
     device,
-    sim_threshold: float = 0.7,
+    sim_threshold: float = 0.5,
     min_synonyms: int = 1
 ) -> Dict:
     """
@@ -178,21 +178,33 @@ def apply_semantic_enhancement(
                 valid_mask = valid_mask.transpose(0, 1).float()
                 valid_mask = valid_mask.unsqueeze(-1)
                 embedding = (language_features * valid_mask).sum(dim=0) / (valid_mask.sum(dim=0) + 1e-8)
+
+                # L2 normalize the embedding for correct cosine similarity computation
+                embedding = F.normalize(embedding, p=2, dim=-1)
+
                 all_embeddings.append(embedding)
 
-            stacked_embeddings = torch.stack(all_embeddings, dim=0)  # [num_synonyms, d_model]
+            stacked_embeddings = torch.stack(all_embeddings, dim=0)  # [num_synonyms, seq_len, d_model]
 
             # Optional: Filter synonyms with low similarity to main synonym
             if sim_threshold > 0.0 and n_original > 1:
                 # Use first synonym as main (reference) synonym
-                main_embedding = stacked_embeddings[0]
+                main_embedding = stacked_embeddings[0]  # [seq_len, d_model]
 
                 # Compute similarity of other synonyms to main synonym
-                other_embeddings = stacked_embeddings[1:]
-                other_sims = F.cosine_similarity(other_embeddings, main_embedding.unsqueeze(0))
+                other_embeddings = stacked_embeddings[1:]  # [n_other, seq_len, d_model]
+
+                # Flatten sequence dimension for comparison
+                main_flat = main_embedding.flatten()  # [seq_len * d_model]
+                other_flat = other_embeddings.flatten(start_dim=1)  # [n_other, seq_len * d_model]
+
+                # Compute cosine similarity
+                other_sims = F.cosine_similarity(other_flat, main_flat.unsqueeze(0)).flatten()  # Ensure 1D
 
                 # Main synonym always has similarity 1.0 to itself
-                sims = torch.cat([torch.tensor([1.0]), other_sims])
+                # Ensure tensors are on the same device and same dimensions
+                device = other_sims.device
+                sims = torch.cat([torch.tensor([1.0], device=device), other_sims])
 
                 # Filter: keep main synonym + top-K others above threshold
                 other_indices = list(range(1, n_original))
