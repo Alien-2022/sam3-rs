@@ -16,7 +16,7 @@ from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 
 from segmentor_lib.core import InferenceEngine
-from segmentor_lib.prompts import load_prompts, precompute_text_features, apply_semantic_enhancement
+from segmentor_lib.prompts import load_prompts, precompute_text_features, apply_semantic_enhancement, apply_semantic_enhancement_with_avg_embedding
 from segmentor_lib.postprocess import fuse_prompts_to_classes, logits_to_pred, resize_logits
 from segmentor_lib.sliding_window import SlidingWindowInference
 from segmentor_lib.debug import MemoryDebugger
@@ -58,8 +58,12 @@ class InferenceConfig:
     # presence_score_mode: str = "before_fusion"
 
     # Semantic enhancement in text space
-    # If True: compute average embedding for synonyms within each class before inference
-    # If False: use all synonyms separately and fuse results (original behavior)
+    # - False (default): use all synonyms separately and fuse results (original behavior)
+    # - "select_word": select the most representative synonym for each class
+    # - "avg_embedding": use average embedding of synonyms for each class
+    # If True (legacy): equivalent to "select_word" mode
+    semantic_enhancement_mode: str = "false"  # "false", "select_word", "avg_embedding"
+    # Legacy alias for backward compatibility
     use_semantic_enhancement: bool = False
 
     # Adaptive threshold strategy
@@ -165,17 +169,31 @@ class SAM3RSSegmentor:
             )
 
         # Apply semantic enhancement if enabled
-        if config.use_semantic_enhancement:
+        # Support legacy use_semantic_enhancement flag and new semantic_enhancement_mode
+        enhancement_mode = getattr(config, 'semantic_enhancement_mode', 'false').lower()
+        if config.use_semantic_enhancement and enhancement_mode == 'false':
+            # Legacy mode: default to select_word
+            enhancement_mode = 'select_word'
+
+        if enhancement_mode == 'select_word':
+            print("Using semantic enhancement: select representative word mode")
             self.prompts = apply_semantic_enhancement(
                 self.processor, self.prompts, self.num_classes, self.device
             )
-            # Update num_prompts after enhancement
             self.num_prompts = len(self.prompts["names"])
-
-        # Pre-compute text features for all prompts to avoid repeated computation
-        self.text_features_cache = precompute_text_features(
-            self.processor, self.prompts, self.device, self.num_prompts
-        )
+        elif enhancement_mode == 'avg_embedding':
+            print("Using semantic enhancement: average embedding mode")
+            self.prompts = apply_semantic_enhancement_with_avg_embedding(
+                self.processor, self.prompts, self.num_classes, self.device
+            )
+            self.num_prompts = len(self.prompts["names"])
+            # Skip precompute_text_features since we already have avg_embeddings
+            self.text_features_cache = None
+        else:
+            # No semantic enhancement: pre-compute text features normally
+            self.text_features_cache = precompute_text_features(
+                self.processor, self.prompts, self.device, self.num_prompts
+            )
 
         # Initialize inference engine with analyzers
         self.engine = InferenceEngine(

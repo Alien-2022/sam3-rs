@@ -312,6 +312,7 @@ def main() -> None:
                                reduce_zero_label=dataset_cfg.get("reduce_zero_label", True),
                                ignore_index=ignore_index)
 
+
             processed += 1
             # Average per image display
             print(f"[eval] {processed}/{total_imgs} images done | Data: {t_data/(processed/8+1e-6):.3f}s/b | Infer: {t_infer/processed:.3f}s/i | Eval: {t_eval/processed:.3f}s/i", end="\r")
@@ -363,25 +364,6 @@ def main() -> None:
         per_class_iou_for_classes = per_class_iou
     else:
         per_class_iou_for_classes = per_class_iou
-
-    # Debug: print lengths to check for mismatch
-    print(f"Debug: dataset.classes = {dataset.classes}")
-    print(f"Debug: len(dataset.classes) = {len(dataset.classes)}")
-    print(f"Debug: metric.num_classes = {metric.num_classes}")
-    print(f"Debug: per_class_iou_for_classes shape = {per_class_iou_for_classes.shape}")
-    print(f"Debug: per_class_iou full shape = {per_class_iou.shape}")
-    print(f"Debug: per_class_iou = {per_class_iou}")
-    print(f"Debug: confusion_matrix shape = {metric.confusion_matrix.shape}")
-    print(f"Debug: confusion_matrix diagonal (TP per class) = {np.diag(metric.confusion_matrix)}")
-    print(f"Debug: confusion_matrix row sums (GT pixels per class) = {metric.confusion_matrix.sum(axis=1)}")
-    print(f"Debug: confusion_matrix col sums (Pred pixels per class) = {metric.confusion_matrix.sum(axis=0)}")
-    print(f"Debug: IoU calculation check:")
-    for i, cls_name in enumerate(dataset.classes):
-        tp = metric.confusion_matrix[i, i]
-        fp = metric.confusion_matrix[:, i].sum() - tp
-        fn = metric.confusion_matrix[i, :].sum() - tp
-        iou_calc = tp / (tp + fp + fn + 1e-10)
-        print(f"  {i}: {cls_name[:30]:30s} TP={tp:7d} FP={fp:7d} FN={fn:7d} IoU={iou_calc:.4f} vs {per_class_iou[i]:.4f}")
 
 
 

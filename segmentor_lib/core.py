@@ -34,6 +34,12 @@ class InferenceEngine:
             self.query_indices = torch.tensor(
                 prompts["indices"], dtype=torch.int64, device=device
             )
+            # Store avg_embeddings if available (from semantic enhancement with avg)
+            self.avg_embeddings = prompts.get("avg_embeddings", None)
+            if self.avg_embeddings:
+                print(f"✓ Using pre-computed average embeddings for {len(self.avg_embeddings)} classes")
+        else:
+            self.avg_embeddings = None
 
         # Initialize adaptive threshold strategy
         self.adaptive_threshold = None
@@ -133,9 +139,24 @@ class InferenceEngine:
             for prompt_idx, prompt_word in enumerate(self.prompts["names"]):
                 # Reset prompts for clean inference
                 self.processor.reset_all_prompts(inference_state)
-                output = self.processor.set_text_prompt(
-                    state=inference_state, prompt=prompt_word
-                )
+
+                # Check if we have pre-computed average embeddings
+                class_id = self.prompts["indices"][prompt_idx]
+                if self.avg_embeddings and class_id in self.avg_embeddings:
+                    # Use pre-computed average embedding
+                    avg_emb = self.avg_embeddings[class_id]
+                    inference_state["backbone_out"].update({
+                        "language_features": avg_emb["language_features"],
+                        "language_mask": avg_emb["language_mask"],
+                        "language_embeds": avg_emb["language_embeds"]
+                    })
+                    # Run grounding inference
+                    output = self.processor._forward_grounding(inference_state)
+                else:
+                    # Use standard text prompt
+                    output = self.processor.set_text_prompt(
+                        state=inference_state, prompt=prompt_word
+                    )
 
                 # Apply adaptive thresholds if enabled
                 adaptive_confidence = None
@@ -353,8 +374,19 @@ class InferenceEngine:
                     if k in backbone_out:
                         del backbone_out[k]
 
-                # Get pre-computed text features from cache
-                if self.text_features_cache is not None and prompt_idx in self.text_features_cache:
+                # Get pre-computed text features from cache or avg_embeddings
+                class_id = self.prompts["indices"][prompt_idx]
+
+                # Priority 1: avg_embeddings (semantic enhancement with average)
+                if self.avg_embeddings and class_id in self.avg_embeddings:
+                    avg_emb = self.avg_embeddings[class_id]
+                    backbone_out.update({
+                        "language_features": avg_emb["language_features"],
+                        "language_mask": avg_emb["language_mask"],
+                        "language_embeds": avg_emb["language_embeds"],
+                    })
+                # Priority 2: text_features_cache (standard pre-computation)
+                elif self.text_features_cache is not None and prompt_idx in self.text_features_cache:
                     cached_features = self.text_features_cache[prompt_idx]
                     backbone_out.update({
                         "language_features": cached_features["language_features"],
