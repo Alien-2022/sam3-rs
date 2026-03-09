@@ -27,12 +27,16 @@ segmentor:
   confidence_threshold: 0.2
   # used to seperate background from foreground in final mask output.
   prob_threshold: 0.1
-  use_presence_score: false
+  use_presence_score: true
   bg_idx: 0
   # Set use_prompted_background=true because cls_potsdam.txt includes "background"
   # as the first line (no need to inject a zero-logit background channel)
   use_prompted_background: true
   weight_key: null
+
+  semantic_enhancement_mode: "avg_embedding"  # Options: "false", "select_word", "avg_embedding"
+  analyze_presence_score: false
+  presence_score_mode: "after_fusion"
 
 output:
   # save_pred_dir: outputs/preds/potsdam

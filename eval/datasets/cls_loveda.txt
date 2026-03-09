@@ -1,7 +1,7 @@
 background
-building,house
-road
+building,architecture,dwelling
+road,street,highway,pavement
 water
-barren,bareland,soil
-forest,tree
-agricultural
+barren,bare soil,bare ground
+forest,woodland
+agricultural,farm,farmland

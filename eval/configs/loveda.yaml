@@ -36,11 +36,12 @@ segmentor:
   # When provided, will call workspace.scripts.get_weights.get_weight_path(weight_key)
   weight_key: null
 
-  use_semantic_enhancement: false
-  analyze_presence_score: true
+  # use_semantic_enhancement: true
+  semantic_enhancement_mode: "avg_embedding"  # Options: "false", "select_word", "avg_embedding"
+  analyze_presence_score: false
   presence_score_mode: "after_fusion"
 
-  adaptive_threshold_strategy: "presence"
+  # adaptive_threshold_strategy: "presence"
   # adaptive_threshold_strategy: "class_specific"
   # adaptive_threshold_strategy: "hybrid"
    # Class-specific thresholds

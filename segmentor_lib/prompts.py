@@ -400,7 +400,12 @@ def apply_semantic_enhancement_with_avg_embedding(
                 pooled_embeddings = []
                 for emb in all_embeddings:
                     # Average over valid tokens
-                    embedding = (emb['language_features'] * emb['valid_mask']).sum(dim=0) / (emb['valid_mask'].sum(dim=0) + 1e-8)
+                    # emb['language_features'] shape: [seq_len, batch, d_model] = [32, 1, 256]
+                    # emb['valid_mask'] shape: [seq_len, batch, 1] = [32, 1, 1]
+                    # We want to average over seq_len (dim 0), result should be [batch, d_model] = [1, 256]
+                    weighted_sum = (emb['language_features'] * emb['valid_mask']).sum(dim=0)  # [1, 256]
+                    mask_sum = emb['valid_mask'].sum(dim=0)  # [1, 1]
+                    embedding = (weighted_sum / (mask_sum + 1e-8)).squeeze(0)  # [256]
                     # L2 normalize
                     embedding = F.normalize(embedding, p=2, dim=-1)
                     pooled_embeddings.append(embedding)
@@ -408,14 +413,19 @@ def apply_semantic_enhancement_with_avg_embedding(
                 stacked_pooled = torch.stack(pooled_embeddings, dim=0)  # [num_synonyms, d_model]
 
                 # Use first synonym as main reference
-                main_embedding = stacked_pooled[0]
-                other_embeddings = stacked_pooled[1:]
+                main_embedding = stacked_pooled[0]  # [d_model]
+                other_embeddings = stacked_pooled[1:]  # [n_other, d_model]
 
                 # Compute cosine similarity (handle case with no other synonyms)
-                if other_embeddings.shape[0] > 0:
-                    # Cosine similarity: (A · B) / (||A|| * ||B||)
-                    # Since embeddings are L2 normalized, ||A|| = ||B|| = 1, so it's just dot product
-                    other_sims = (other_embeddings * main_embedding).sum(dim=-1)
+                n_other = other_embeddings.shape[0]
+                if n_other > 0:
+                    # Ensure main_embedding is 1D [d_model]
+                    if main_embedding.dim() > 1:
+                        main_embedding = main_embedding.view(-1)
+                    # Expand to [1, d_model] for broadcasting with [n, d_model]
+                    main_embedding_expanded = main_embedding.unsqueeze(0)  # [1, d_model]
+                    # Use cosine similarity function which handles dimensions correctly
+                    other_sims = F.cosine_similarity(other_embeddings, main_embedding_expanded.expand(n_other, -1))
                     # Main synonym always has similarity 1.0
                     sims = torch.cat([torch.tensor([1.0], device=device), other_sims])
                 else:
@@ -430,11 +440,17 @@ def apply_semantic_enhancement_with_avg_embedding(
                     n_others_needed = min_synonyms - 1
 
                     if n_others_above >= n_others_needed:
+                        # Enough synonyms above threshold: keep only those above threshold
                         keep_other_indices = [i for i, sim in zip(other_indices, other_sims) if sim >= sim_threshold]
                     else:
+                        # Not enough: keep top-K most similar (but still filter by threshold if possible)
                         top_k = min(n_others_needed, n_original - 1)
                         topk_other_indices = torch.argsort(other_sims, descending=True)[:top_k].tolist()
-                        keep_other_indices = [other_indices[i] for i in topk_other_indices]
+                        # Only keep those that meet the threshold
+                        keep_other_indices = [other_indices[i] for i in topk_other_indices if other_sims[i] >= sim_threshold]
+                        # If none meet threshold, fallback to just main synonym
+                        if len(keep_other_indices) == 0:
+                            keep_other_indices = []
 
                     keep_indices = [0] + keep_other_indices
                 else:
@@ -462,18 +478,20 @@ def apply_semantic_enhancement_with_avg_embedding(
                 n_filtered = n_original
 
             # Compute average embedding
-            avg_language_features = torch.stack([emb['language_features'] for emb in all_embeddings]).mean(dim=0)
-            avg_language_mask = all_embeddings[0]['language_mask']  # Use first synonym's mask
-            avg_language_embeds = torch.stack([emb['language_embeds'] for emb in all_embeddings]).mean(dim=0)
+            if len(all_embeddings) == 1:
+                # Single synonym: use directly without averaging or normalization
+                avg_language_features = all_embeddings[0]['language_features']
+                avg_language_mask = all_embeddings[0]['language_mask']
+                avg_language_embeds = all_embeddings[0]['language_embeds']
+            else:
+                # Multiple synonyms: average them
+                avg_language_features = torch.stack([emb['language_features'] for emb in all_embeddings]).mean(dim=0)
+                avg_language_mask = all_embeddings[0]['language_mask']  # Use first synonym's mask
+                avg_language_embeds = torch.stack([emb['language_embeds'] for emb in all_embeddings]).mean(dim=0)
 
-            # L2 normalize the averaged features for correct cosine similarity
-            valid_mask = ~avg_language_mask
-            valid_mask = valid_mask.transpose(0, 1).float()
-            valid_mask = valid_mask.unsqueeze(-1)
-            avg_language_features = F.normalize(
-                avg_language_features * valid_mask,
-                p=2, dim=-1
-            ) / (valid_mask.sum(dim=0, keepdim=True) + 1e-8)
+                # NOTE: Don't normalize averaged features!
+                # These are the actual features used in the model, not for similarity calculation
+                # Re-normalizing would change the model's expected input distribution
 
             # Store average embedding
             avg_embeddings[class_id] = {

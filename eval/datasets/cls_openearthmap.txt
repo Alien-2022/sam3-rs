@@ -1,6 +1,6 @@
 barren,bare soil,bare ground
 grassland,grass,meadow,prairie
-dveloped space,atificial surface,built-up land
+developed space,atificial surface,built-up land
 road,street,highway,pavement
 forest,woodland
 water

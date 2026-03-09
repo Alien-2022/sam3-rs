@@ -1,6 +1,6 @@
 clutter
-road
-building
-grass
-tree
+road,street,highway,pavement
+building,dwelling,architecture
+grass,grassland,meadow,prairie
+tree,forest,woodland
 car
