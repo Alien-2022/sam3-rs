@@ -41,10 +41,10 @@ class InferenceEngine:
         else:
             self.avg_embeddings = None
 
-        # Initialize adaptive threshold strategy
+        # Initialize adaptive threshold strategy (experimental feature)
         self.adaptive_threshold = None
         if hasattr(config, 'adaptive_threshold_strategy') and config.adaptive_threshold_strategy:
-            from .adaptive_threshold import get_adaptive_threshold_strategy
+            from .experimental.adaptive_threshold import get_adaptive_threshold_strategy
             self.adaptive_threshold = get_adaptive_threshold_strategy(
                 strategy_name=config.adaptive_threshold_strategy,
                 base_confidence=config.confidence_threshold,

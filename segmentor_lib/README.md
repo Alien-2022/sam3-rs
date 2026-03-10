@@ -8,39 +8,28 @@
 
 ```
 workspace/core/sam3-rs/
-├── segmentor.py              # 主入口 (~355 行，对外接口)
+├── segmentor.py              # 主入口 (~420 行，对外接口)
 ├── segmentorV1.py            # 原始备份 (1244 行)
 └── segmentor_lib/           # 核心模块目录
-    ├── __init__.py
+    ├── __init__.py           # 模块入口，暴露核心接口
     ├── README.md             # 本文件
     ├── core.py               # InferenceEngine 核心推理引擎
     ├── analyzers.py          # 分析器/钩子 (PresenceScoreAnalyzer)
-    ├── prompts.py            # 提示词加载和语义增强
+    ├── prompts.py            # 提示词加载和预计算
     ├── postprocess.py        # 后处理 (融合、resize、预测)
     ├── sliding_window.py     # 滑动窗口推理
-    └── debug.py              # 内存调试工具
+    ├── debug.py              # 内存调试工具
+    └── experimental/         # 实验性功能（可插拔）
+        ├── __init__.py       # 实验模块入口
+        ├── semantic_enhancement.py  # 语义增强
+        └── adaptive_threshold.py    # 动态阈值策略
 ```
-
-## 重构进度
-
-### ✅ 已完成
-- [x] `core.py` - InferenceEngine 核心推理逻辑 (432 行)
-- [x] `analyzers.py` - BaseAnalyzer 和 PresenceScoreAnalyzer (133 行)
-- [x] `prompts.py` - 提示词加载、预计算、语义增强 (196 行)
-- [x] `postprocess.py` - 同义词融合、logits 转预测、resize (119 行)
-- [x] `sliding_window.py` - 滑动窗口推理 (108 行)
-- [x] `debug.py` - MemoryDebugger 内存调试 (71 行)
-- [x] `segmentor.py` 重构 - 简化为对外接口 (~355 行)
-- [x] `run_eval.py` 更新 - 使用新的 Analyzer 报告接口
-
-### 📋 待完成
-- [ ] 添加单元测试
-- [ ] 性能基准测试
-- [ ] 完善文档和注释
 
 ## 模块说明
 
-### 1. core.py - InferenceEngine
+### 核心模块（稳定）
+
+#### 1. core.py - InferenceEngine
 核心推理引擎，包含单图和批量推理逻辑。
 
 **主要方法：**
@@ -48,29 +37,14 @@ workspace/core/sam3-rs/
 - `inference_batch_view(images, detailed, image_names)` - 批量推理
 - `get_analyzer(analyzer_class)` - 按类型获取 Analyzer
 
-### 2. analyzers.py - 分析器
-基于钩子的分析器系统，支持扩展。
-
-**主要类：**
-- `BaseAnalyzer` - 抽象基类，定义钩子接口
-- `PresenceScoreAnalyzer` - 收集和报告 presence score 统计
-
-**钩子点：**
-| 钩子点 | 调用时机 |
-|--------|----------|
-| `on_before_inference` | 每张/批图像推理前 |
-| `on_after_prompt` | 每个prompt处理后 |
-| `on_after_inference` | 每张/批图像推理后 |
-
-### 3. prompts.py - 提示词管理
-处理提示词加载、文本特征预计算和语义增强。
+#### 2. prompts.py - 提示词管理
+处理提示词加载和文本特征预计算。
 
 **主要函数：**
 - `load_prompts(prompts_file)` - 加载提示词配置
 - `precompute_text_features(processor, prompts, device, num_prompts)` - 预计算文本特征
-- `apply_semantic_enhancement(processor, prompts, num_classes, device)` - 语义增强（选择代表词）
 
-### 4. postprocess.py - 后处理
+#### 3. postprocess.py - 后处理
 推理结果的后处理操作。
 
 **主要函数：**
@@ -78,17 +52,66 @@ workspace/core/sam3-rs/
 - `logits_to_pred(logits, use_prompted_background, prob_threshold, bg_idx)` - logits 转预测
 - `resize_logits(logits, target_shape)` - 调整尺寸
 
-### 5. sliding_window.py - 滑动窗口
+#### 4. analyzers.py - 分析器
+基于钩子的分析器系统，支持扩展。
+
+**主要类：**
+- `BaseAnalyzer` - 抽象基类，定义钩子接口
+- `PresenceScoreAnalyzer` - 收集和报告 presence score 统计
+- `StatisticsAnalyzer` - 综合统计分析器
+
+**钩子点：**
+| 钩子点 | 调用时机 |
+|--------|----------|
+| `on_before_inference` | 每张/批图像推理前 |
+| `on_after_prompt` | 每个prompt处理后 |
+| `on_after_inference` | 每张/批图像推理后 |
+| `on_after_eval` | 每张图像评估完成后 (含 GT 和预测) |
+
+**StatisticsAnalyzer 功能：**
+- 类别级分析: IoU, Precision, Recall, F1 分布
+- 混淆矩阵: 识别类别混淆模式
+- 尺寸分层分析: 小/中/大目标性能对比
+- 错误模式分析: 漏检 vs 误检
+- 类别共现分析: 多类别场景性能
+
+#### 5. sliding_window.py - 滑动窗口
 大图像的滑动窗口推理。
 
 **主要类：**
 - `SlidingWindowInference` - 封装滑动窗口逻辑
 
-### 6. debug.py - 调试工具
+#### 6. debug.py - 调试工具
 内存调试和日志记录。
 
 **主要类：**
 - `MemoryDebugger` - tensor 内存追踪、CUDA 内存监控
+
+---
+
+### 实验性模块（可能被移除）
+
+> ⚠️ **注意**：这些模块是实验性功能，可能在未来的版本中被移除或大幅修改。
+
+#### 1. experimental/semantic_enhancement.py - 语义增强
+同义词语义增强策略。
+
+**主要函数：**
+- `apply_semantic_enhancement(processor, prompts, num_classes, device)` - 选择代表词模式
+- `apply_semantic_enhancement_with_avg_embedding(...)` - 平均嵌入模式
+- `get_semantic_enhancer(mode)` - 工厂函数
+
+#### 2. experimental/adaptive_threshold.py - 动态阈值
+基于 presence score 或图像特征动态调整阈值。
+
+**主要类：**
+- `PresenceScoreAdaptiveThreshold` - 基于 presence score 调整
+- `ClassSpecificAdaptiveThreshold` - 类别特定阈值
+- `HybridAdaptiveThreshold` - 混合策略
+- `ImageFeatureAdaptiveThreshold` - 基于图像特征调整
+- `get_adaptive_threshold_strategy(strategy_name, ...)` - 工厂函数
+
+---
 
 ## 使用方式
 
@@ -132,7 +155,17 @@ if analyzer:
     analyzer.report()
 ```
 
-### 3. 启用调试功能
+### 3. 启用实验性功能
+
+```python
+# 语义增强
+config.semantic_enhancement_mode = "select_word"  # 或 "avg_embedding"
+
+# 动态阈值
+config.adaptive_threshold_strategy = "presence"
+```
+
+### 4. 启用调试功能
 
 ```python
 config.debug_memory = True
@@ -142,7 +175,7 @@ segmentor = SAM3RSSegmentor(config)
 # 内存使用信息将写入 debug.log
 ```
 
-### 4. 自定义分析器
+### 5. 自定义分析器
 
 ```python
 from segmentor_lib.analyzers import BaseAnalyzer
@@ -168,17 +201,36 @@ timing_analyzer = TimingAnalyzer()
 segmentor.engine.register_analyzer(timing_analyzer)
 ```
 
+---
+
+## 删除实验功能
+
+如果实验功能验证失败需要移除，只需：
+
+```bash
+# 1. 删除实验功能目录
+rm -rf segmentor_lib/experimental/
+
+# 2. 从 InferenceConfig 中移除相关配置项
+# 3. 从 segmentor.py 中移除实验功能的导入和调用
+```
+
+---
+
 ## 优势对比
 
 | 方面 | 重构前 | 重构后 |
 |------|--------|--------|
-| 主文件行数 | 1244 | ~355 |
-| 模块化程度 | 单文件 | 6个独立模块 |
+| 主文件行数 | 1244 | ~420 |
+| 模块化程度 | 单文件 | 8个独立模块 |
 | 核心代码可读性 | 调试代码混杂 | 纯净逻辑 |
 | 添加新功能 | 需修改 segmentor.py | 添加新 Analyzer/模块 |
 | 调试功能 | 分散在代码中 | 统一 MemoryDebugger |
 | 单元测试 | 难以独立测试 | 每个模块独立测试 |
 | API 稳定性 | - | 对外接口不变 |
+| 实验功能隔离 | 混在核心代码中 | 独立 experimental 目录 |
+
+---
 
 ## 外部接口变化
 
@@ -189,6 +241,8 @@ segmentor.engine.register_analyzer(timing_analyzer)
 
 **已移除：**
 - `print_presence_score_stats()` - 改用 `engine.get_analyzer(PresenceScoreAnalyzer).report()`
+
+---
 
 ## 命令行使用
 
@@ -202,6 +256,8 @@ python workspace/core/sam3-rs/eval/run_eval.py --config loveda.yaml --analyze-pr
 # 启用内存调试
 python workspace/core/sam3-rs/eval/run_eval.py --config loveda.yaml --debug-memory
 ```
+
+---
 
 ## 迁移历史
 
@@ -223,8 +279,17 @@ python workspace/core/sam3-rs/eval/run_eval.py --config loveda.yaml --debug-memo
 - 更新 `run_eval.py` 使用新接口
 - 简化 `segmentor.py` 为对外接口
 
+### 阶段 5: 实验功能隔离 (已完成)
+- 创建 `experimental/` 目录
+- 移动 `adaptive_threshold.py` 到 experimental
+- 拆分 `prompts.py`，语义增强功能移入 experimental
+- 添加 `__init__.py` 文件暴露接口
+
+---
+
 ## 注意事项
 
 1. **向后兼容**: `segmentor.py` 对外接口保持不变
 2. **渐进式迁移**: 每个模块独立完成，不影响其他部分
 3. **备份保留**: 原始代码备份在 `segmentorV1.py`
+4. **实验功能可插拔**: experimental 目录可随时移除

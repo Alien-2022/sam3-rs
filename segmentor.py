@@ -16,7 +16,7 @@ from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 
 from segmentor_lib.core import InferenceEngine
-from segmentor_lib.prompts import load_prompts, precompute_text_features, apply_semantic_enhancement, apply_semantic_enhancement_with_avg_embedding
+from segmentor_lib.prompts import load_prompts, precompute_text_features
 from segmentor_lib.postprocess import fuse_prompts_to_classes, logits_to_pred, resize_logits
 from segmentor_lib.sliding_window import SlidingWindowInference
 from segmentor_lib.debug import MemoryDebugger
@@ -177,6 +177,7 @@ class SAM3RSSegmentor:
 
         if enhancement_mode == 'select_word':
             print("Using semantic enhancement: select representative word mode")
+            from segmentor_lib.experimental.semantic_enhancement import apply_semantic_enhancement
             self.prompts = apply_semantic_enhancement(
                 self.processor, self.prompts, self.num_classes, self.device
             )
@@ -187,6 +188,7 @@ class SAM3RSSegmentor:
             )
         elif enhancement_mode == 'avg_embedding':
             print("Using semantic enhancement: average embedding mode")
+            from segmentor_lib.experimental.semantic_enhancement import apply_semantic_enhancement_with_avg_embedding
             self.prompts = apply_semantic_enhancement_with_avg_embedding(
                 self.processor, self.prompts, self.num_classes, self.device
             )
@@ -296,7 +298,7 @@ class SAM3RSSegmentor:
 
         # Use adaptive prob_threshold if available
         if adaptive_prob_thresholds is not None:
-            from segmentor_lib.postprocess import logits_to_pred_adaptive
+            from segmentor_lib.experimental.adaptive_threshold import logits_to_pred_adaptive
             seg_pred = logits_to_pred_adaptive(
                 seg_logits, self.config.use_prompted_background,
                 adaptive_prob_thresholds, self.config.prob_threshold, bg_idx

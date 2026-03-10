@@ -25,6 +25,7 @@ if str(SAM3_RS_DIR) not in sys.path:
 from segmentor import SAM3RSSegmentor, InferenceConfig  # type: ignore
 from eval.datasets import DATASET_REGISTRY
 from eval.metrics.seg_metrics import SegmentationMetric
+from segmentor_lib.analyzers import StatisticsAnalyzer
 
 # Optional workspace-level registry helpers (for NAS paths)
 try:
@@ -125,6 +126,11 @@ def build_segmentor(seg_cfg: Dict[str, Any]) -> SAM3RSSegmentor:
     # Extract debug_memory and debug_log_file separately
     debug_memory = infer_kwargs.pop("debug_memory", False)
     debug_log_file = infer_kwargs.pop("debug_log_file", None)
+
+    # Pop analyzer-related configs (not part of InferenceConfig)
+    infer_kwargs.pop("analyze_statistics", None)
+    infer_kwargs.pop("compute_boundary_iou", None)
+    infer_kwargs.pop("analyze_presence_score", None)
 
     infer_cfg = InferenceConfig(
         checkpoint_path=infer_kwargs.pop("checkpoint_path"),
@@ -262,6 +268,16 @@ def main() -> None:
         bg_idx=bg_idx,
     )
 
+    # Initialize StatisticsAnalyzer for comprehensive analysis (controlled by config)
+    analyze_statistics = cfg.get("segmentor", {}).get("analyze_statistics", False)
+    stats_analyzer = StatisticsAnalyzer(
+        num_classes=metric_num_classes,
+        class_names=dataset.classes,
+        ignore_index=dataset_cfg.get("ignore_index", 255),
+        enabled=analyze_statistics,
+        compute_boundary_iou=cfg.get("segmentor", {}).get("compute_boundary_iou", False),
+    )
+
     save_pred_dir = cfg.get("output", {}).get("save_pred_dir")
     metrics_json = cfg.get("output", {}).get("metrics_json")
 
@@ -306,6 +322,14 @@ def main() -> None:
             gt_np = gt_mask.numpy().astype(np.uint8)
 
             metric.update(pred_np, gt_np)
+            
+            # Update statistics analyzer
+            stats_analyzer.on_after_eval({
+                'image_name': os.path.basename(img_path),
+                'gt_mask': gt_np,
+                'pred_mask': pred_np,
+            })
+            
             if save_pred_dir is not None:
                 ignore_index = dataset_cfg.get("ignore_index", 255)
                 save_prediction(pred_np, save_pred_dir, img_path, gt_mask,
@@ -318,8 +342,8 @@ def main() -> None:
             print(f"[eval] {processed}/{total_imgs} images done | Data: {t_data/(processed/8+1e-6):.3f}s/b | Infer: {t_infer/processed:.3f}s/i | Eval: {t_eval/processed:.3f}s/i", end="\r")
         t_eval += (time.time() - t_eval_start)
 
-        # if processed >= 100:
-        #     break
+        if processed >= 20:
+            break
         t_start_loop = time.time()
 
         # 定期清理 GPU 缓存 - 每 5 个 batch 清理一次，避免频繁清理影响性能
@@ -339,6 +363,10 @@ def main() -> None:
         analyzer = segmentor.engine.get_analyzer(PresenceScoreAnalyzer)
         if analyzer:
             analyzer.report()
+
+    # Print comprehensive statistics analysis
+    print("\n")
+    stats_analyzer.report()
 
     print(f"\n--- Timing Summary (per image) ---")
     print(f"Data loading: {t_data / processed:.3f}s")

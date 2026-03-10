@@ -34,6 +34,20 @@ segmentor:
   use_prompted_background: true
   weight_key: null
 
+  # ========================================
+  # Experimental Features (may be removed)
+  # ========================================
+  semantic_enhancement_mode: "false"  # Options: "false", "select_word", "avg_embedding"
+  adaptive_threshold_strategy: null  # Options: null, "presence", "class_specific", "hybrid"
+  analyze_presence_score: false
+  presence_score_mode: "after_fusion"
+
+  # ========================================
+  # Statistics Analysis
+  # ========================================
+  analyze_statistics: true  # Enable comprehensive statistics analysis
+  compute_boundary_iou: false  # Enable boundary IoU computation (slower)
+
 output:
   # save_pred_dir: outputs/preds/vaihingen
   metrics_json: outputs/metrics/vaihingen.json
