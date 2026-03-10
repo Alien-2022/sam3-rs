@@ -319,6 +319,8 @@ class StatisticsAnalyzer(BaseAnalyzer):
         
         # 4. Class co-occurrence
         present_classes = np.unique(gt_valid)
+        # Filter out class IDs that are out of range
+        present_classes = present_classes[present_classes < self.num_classes]
         for c1 in present_classes:
             for c2 in present_classes:
                 self.cooccurrence_matrix[c1, c2] += 1
