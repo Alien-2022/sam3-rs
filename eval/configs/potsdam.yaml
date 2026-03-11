@@ -37,10 +37,10 @@ segmentor:
   # ========================================
   # Experimental Features (may be removed)
   # ========================================
-  semantic_enhancement_mode: "select_word"  # Options: "false", "select_word", "avg_embedding"
+  semantic_enhancement_mode: "false"  # Options: "false", "select_word", "avg_embedding"
   adaptive_threshold_strategy: null  # Options: null, "presence", "class_specific", "hybrid"
   analyze_presence_score: false
-  presence_score_mode: "after_fusion"
+  presence_score_mode: "before_fusion"
 
   # ========================================
   # Statistics Analysis

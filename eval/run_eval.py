@@ -274,6 +274,8 @@ def main() -> None:
         num_classes=metric_num_classes,
         class_names=dataset.classes,
         ignore_index=dataset_cfg.get("ignore_index", 255),
+        use_prompted_background=use_prompted_background,
+        bg_idx=bg_idx,
         enabled=analyze_statistics,
         compute_boundary_iou=cfg.get("segmentor", {}).get("compute_boundary_iou", False),
     )
@@ -342,8 +344,8 @@ def main() -> None:
             print(f"[eval] {processed}/{total_imgs} images done | Data: {t_data/(processed/8+1e-6):.3f}s/b | Infer: {t_infer/processed:.3f}s/i | Eval: {t_eval/processed:.3f}s/i", end="\r")
         t_eval += (time.time() - t_eval_start)
 
-        if processed >= 20:
-            break
+        # if processed >= 20:
+        #     break
         t_start_loop = time.time()
 
         # 定期清理 GPU 缓存 - 每 5 个 batch 清理一次，避免频繁清理影响性能

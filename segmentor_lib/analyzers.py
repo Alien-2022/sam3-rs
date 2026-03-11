@@ -196,6 +196,8 @@ class StatisticsAnalyzer(BaseAnalyzer):
         num_classes: int,
         class_names: Optional[List[str]] = None,
         ignore_index: int = 255,
+        use_prompted_background: bool = False,
+        bg_idx: int = 0,
         enabled: bool = True,
         compute_boundary_iou: bool = False,
         size_bins: Optional[List[float]] = None
@@ -205,6 +207,10 @@ class StatisticsAnalyzer(BaseAnalyzer):
             num_classes: Number of classes (excluding ignore_index)
             class_names: List of class names (optional)
             ignore_index: Index to ignore in evaluation
+            use_prompted_background: If True, background is in prompts (GT has background class).
+                                    If False, background is injected by segmentor (GT has no background),
+                                    and background predictions should be filtered.
+            bg_idx: Index of background class in predictions
             enabled: Whether to enable analysis
             compute_boundary_iou: Whether to compute boundary IoU (slower)
             size_bins: Bins for size-stratified analysis [0, 0.01, 0.05, 0.1, 1.0]
@@ -212,6 +218,8 @@ class StatisticsAnalyzer(BaseAnalyzer):
         self.num_classes = num_classes
         self.class_names = class_names or [f"class_{i}" for i in range(num_classes)]
         self.ignore_index = ignore_index
+        self.use_prompted_background = use_prompted_background
+        self.bg_idx = bg_idx
         self.enabled = enabled
         self.compute_boundary_iou = compute_boundary_iou
         self.size_bins = size_bins or [0.0, 0.01, 0.05, 0.1, 0.2, 1.0]
@@ -286,10 +294,24 @@ class StatisticsAnalyzer(BaseAnalyzer):
         if not isinstance(pred_mask, np.ndarray):
             pred_mask = np.array(pred_mask)
         
-        # Create valid mask (ignore ignore_index)
+        # Layer 1: Filter out ignore_index regions
         valid_mask = (gt_mask != self.ignore_index)
         gt_valid = gt_mask[valid_mask]
         pred_valid = pred_mask[valid_mask]
+
+        # Layer 2: Filter out background predictions if GT has no background class
+        # When use_prompted_background=False, background is injected by segmentor
+        # and should be filtered since GT doesn't have a true background class
+        if not self.use_prompted_background:
+            # Keep only pixels where prediction is not background
+            mask_bg = (pred_valid != self.bg_idx)
+            gt_valid = gt_valid[mask_bg]
+            pred_valid = pred_valid[mask_bg]
+
+            # For consistency with SegmentationMetric, map labels [1, num_classes] to [0, num_classes-1]
+            # when use_prompted_background=False
+            gt_valid = gt_valid - 1
+            pred_valid = pred_valid - 1
         
         # 1. Update confusion matrix
         for gt_cls in range(self.num_classes):
