@@ -76,8 +76,8 @@ class SlidingWindowInference:
                         crop, detailed=detailed, image_name=f"{image_name}_crop_{crop_y}_{crop_x}"
                     )
 
-                    # Collect adaptive thresholds from first crop (they should be similar across crops)
-                    if crop_adaptive is not None and not adaptive_prob_thresholds_list:
+                    # Collect adaptive thresholds from each crop and average them later
+                    if crop_adaptive is not None:
                         adaptive_prob_thresholds_list.append(crop_adaptive)
 
                     # Resize crop result to match original crop size (in case padding was used)
@@ -127,7 +127,14 @@ class SlidingWindowInference:
         semantic_logits = semantic_logits_sum / count_map.unsqueeze(0) if semantic_logits_sum is not None else None
         instance_logits = instance_logits_sum / count_map.unsqueeze(0) if instance_logits_sum is not None else None
 
-        # Return adaptive thresholds from first crop (or None if not available)
-        adaptive_prob_thresholds = adaptive_prob_thresholds_list[0] if adaptive_prob_thresholds_list else None
+        # Average adaptive thresholds across all crops
+        if adaptive_prob_thresholds_list:
+            all_keys = adaptive_prob_thresholds_list[0].keys()
+            adaptive_prob_thresholds = {
+                k: float(sum(d[k] for d in adaptive_prob_thresholds_list) / len(adaptive_prob_thresholds_list))
+                for k in all_keys
+            }
+        else:
+            adaptive_prob_thresholds = None
 
         return seg_logits, per_class_results, semantic_logits, instance_logits, adaptive_prob_thresholds

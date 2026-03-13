@@ -83,6 +83,15 @@ class InferenceConfig:
     slide_crop_size: int = 0  # 0 means no sliding
     slide_stride: int = 512
 
+    # Multi-scale inference
+    # List of scale factors (e.g., [0.5, 1.0, 1.5]) for test-time augmentation.
+    # When non-empty, each scale is inferred separately and the logits are merged.
+    # Merge strategy is controlled by multi_scale_merge_mode.
+    # Setting this takes effect only when slide_crop_size == 0.
+    multi_scale_factors: Optional[List[float]] = None
+    # How to combine multi-scale logits: "avg" (default) or "max"
+    multi_scale_merge_mode: str = "avg"
+
     # Text prompts
     prompts_file: Optional[str] = None  # Path to prompts config
 
@@ -244,6 +253,18 @@ class SAM3RSSegmentor:
         )
         return sliding_window(image, detailed, image_name)
 
+    def _multi_scale_inference(self, image: Image.Image, detailed: bool = False,
+                               image_name: str = "unknown"):
+        """Run multi-scale inference."""
+        from segmentor_lib.multi_scale import MultiScaleInference
+        multi_scale = MultiScaleInference(
+            inference_func=self._inference_single_view,
+            scales=self.config.multi_scale_factors,
+            merge_mode=self.config.multi_scale_merge_mode,
+            device=self.device,
+        )
+        return multi_scale(image, detailed, image_name)
+
     def predict_single(
         self, image_path: str, detailed: bool = False
     ) -> SegmentationResult:
@@ -271,6 +292,11 @@ class SAM3RSSegmentor:
         ):
             # Use sliding window for large images
             seg_logits, per_class_results, semantic_logits_only, instance_logits_only, adaptive_prob_thresholds = self._sliding_window_inference(
+                image, detailed=detailed, image_name=image_name
+            )
+        elif self.config.multi_scale_factors:
+            # Multi-scale inference
+            seg_logits, per_class_results, semantic_logits_only, instance_logits_only, adaptive_prob_thresholds = self._multi_scale_inference(
                 image, detailed=detailed, image_name=image_name
             )
         else:

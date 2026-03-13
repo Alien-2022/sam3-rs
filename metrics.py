@@ -103,6 +103,7 @@ class RSEvaluator:
         """
         # Load images
         from PIL import Image
+        import warnings
 
         pred = np.array(Image.open(pred_path))
         gt = np.array(Image.open(gt_path))
@@ -111,16 +112,39 @@ class RSEvaluator:
         valid_mask = gt != self.ignore_index
 
         # Flatten
-        pred = pred[valid_mask]
-        gt = gt[valid_mask]
+        pred = pred[valid_mask].astype(np.int64)
+        gt = gt[valid_mask].astype(np.int64)
 
-        # Update confusion matrix
-        for i in range(self.num_classes):
-            for j in range(self.num_classes):
-                self.confusion_matrix[i, j] += np.sum((pred == i) & (gt == j))
+        # Warn and clip out-of-range class IDs to avoid silent index errors
+        pred_oob = (pred < 0) | (pred >= self.num_classes)
+        gt_oob   = (gt  < 0) | (gt  >= self.num_classes)
+        if pred_oob.any():
+            warnings.warn(
+                f"Prediction contains {pred_oob.sum()} pixel(s) with class ID "
+                f"outside [0, {self.num_classes - 1}] (min={pred[pred_oob].min()}, "
+                f"max={pred[pred_oob].max()}). They will be clipped.",
+                UserWarning,
+                stacklevel=2,
+            )
+        if gt_oob.any():
+            warnings.warn(
+                f"Ground truth contains {gt_oob.sum()} pixel(s) with class ID "
+                f"outside [0, {self.num_classes - 1}] (min={gt[gt_oob].min()}, "
+                f"max={gt[gt_oob].max()}). They will be clipped.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        pred = np.clip(pred, 0, self.num_classes - 1)
+        gt   = np.clip(gt,   0, self.num_classes - 1)
+
+        # Vectorized confusion matrix update using np.bincount (O(n) vs O(n²))
+        idx = self.num_classes * gt + pred
+        hist = np.bincount(idx, minlength=self.num_classes ** 2)
+        self.confusion_matrix += hist.reshape(self.num_classes, self.num_classes)
 
         self.total_pixels += len(pred)
-        self.correct_pixels += np.sum(pred == gt)
+        self.correct_pixels += int(np.sum(pred == gt))
 
     def update_batch(self, pred_paths: List[str], gt_paths: List[str]):
         """
