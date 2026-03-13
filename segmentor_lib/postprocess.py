@@ -21,28 +21,31 @@ def fuse_prompts_to_classes(seg_logits: torch.Tensor, query_indices: torch.Tenso
     """
     # Handle both single image and batch
     batch_mode = seg_logits.dim() == 4
+    
+    # Get spatial dimensions
     if batch_mode:
-        # seg_logits: [B, num_prompts, H, W]
-        seg_logits = seg_logits.unsqueeze(1)  # [B, 1, num_prompts, H, W]
+        B, _, H, W = seg_logits.shape
     else:
-        # seg_logits: [num_prompts, H, W] -> [1, num_prompts, H, W]
-        seg_logits = seg_logits.unsqueeze(0)
-
-    # Convert query indices to one-hot vectors
-    # query_idx=[0, 1, 1, 2] -> one_hot -> [[1,0,0], [0,1,0], [0,1,0], [0,0,1]]
-    cls_index = F.one_hot(query_indices, num_classes=num_classes)
-
-    # Transpose to [num_classes, num_prompts], reshape to [num_classes, num_prompts, 1, 1]
-    cls_index = cls_index.T.view(num_classes, num_prompts, 1, 1)
-
-    # Broadcast multiply: [B, 1, num_prompts, H, W] * [1, num_classes, num_prompts, 1, 1]
-    # Then take max over prompts dimension to get [B, num_classes, H, W]
-    if batch_mode:
-        seg_logits = (seg_logits * cls_index.unsqueeze(0)).max(2)[0]
-    else:
-        seg_logits = (seg_logits * cls_index).max(1)[0]
-
-    return seg_logits
+        _, H, W = seg_logits.shape
+        B = 1
+    
+    # Output tensor: [B, num_classes, H, W]
+    output_shape = (B, num_classes, H, W) if batch_mode else (num_classes, H, W)
+    
+    # Initialize output with very negative values (for max operation)
+    fused = torch.full(output_shape, float('-inf'), 
+                       dtype=seg_logits.dtype, device=seg_logits.device)
+    
+    # For each prompt, scatter its logits to the corresponding class
+    for p in range(num_prompts):
+        cls_idx = query_indices[p].item()
+        if batch_mode:
+            # Take max with existing values
+            fused[:, cls_idx] = torch.maximum(fused[:, cls_idx], seg_logits[:, p])
+        else:
+            fused[cls_idx] = torch.maximum(fused[cls_idx], seg_logits[p])
+    
+    return fused
 
 
 def logits_to_pred(logits: torch.Tensor, use_prompted_background: bool,

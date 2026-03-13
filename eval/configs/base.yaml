@@ -1,6 +1,6 @@
 # Common defaults for eval configs
 dataloader:
-  batch_size: 2
+  batch_size: 1
   num_workers: 4
   # accelerate data transfer from CPU to GPU
   pin_memory: true
@@ -8,7 +8,7 @@ dataloader:
 segmentor:
   device: cuda
   slide_crop_size: 0
-  slide_stride: 512
+  slide_stride: 1024
 
 output:
   save_pred_dir: null

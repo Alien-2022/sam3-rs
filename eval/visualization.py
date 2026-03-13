@@ -22,8 +22,8 @@ except ImportError:
     # 支持直接运行脚本
     from colormaps import COLORMAPS, get_colormap, load_colormap_from_json
 
-# 设置中文字体支持
-plt.rcParams['font.sans-serif'] = ['SimHei', 'Noto Serif CJK JP', 'Noto Sans CJK JP']
+# 设置字体支持（优先使用中文字体，回退到 DejaVu Sans）
+plt.rcParams['font.sans-serif'] = ['SimHei', 'Noto Serif CJK JP', 'Noto Sans CJK JP', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
 
 
@@ -378,7 +378,7 @@ def main():
 
 
 if __name__ == "__main__":
-    """
+    r"""
     # 查看可用颜色映射
     python visualization.py --list-colormaps
     # LoveDA 单张
@@ -386,7 +386,8 @@ if __name__ == "__main__":
     python eval/visualization.py --gt data/LoveDA/Exp/mask/2522.png --pred outputs/preds/loveda/2522.png --output outputs/compare/2522.png --colormap loveda
     # LoveDA 批量
     python visualization.py --gt gt_dir/ --pred pred_dir/ --output out_dir/ --colormap loveda_pred
-    python eval/visualization.py --gt data/isAID/Exp/mask --pred outputs\preds\isAID --output outputs/compare --colormap isaid
+    python eval/visualization.py --gt data/isAID/Exp/mask --pred outputs/preds/isAID --output outputs/compare --colormap isaid
+    python eval/visualization.py --gt data/Potsdam/pre_slice/mask --pred outputs/preds/potsdam --output outputs/compare --colormap potsdam
     # 自定义数据集
     python visualization.py --gt gt.png --pred pred.png --output out.png --colormap custom --colormap-file custom.json
     """

@@ -284,6 +284,9 @@ class SAM3RSSegmentor:
         semantic_logits_only = resize_logits(semantic_logits_only, original_shape) if semantic_logits_only is not None else None
         instance_logits_only = resize_logits(instance_logits_only, original_shape) if instance_logits_only is not None else None
 
+        # Clear cache after sliding window (helps with large images)
+        torch.cuda.empty_cache()
+
         # Map prompts to actual class IDs (handle synonyms)
         if self.num_classes != self.num_prompts:
             seg_logits = fuse_prompts_to_classes(seg_logits, self.query_indices, self.num_classes, self.num_prompts)
@@ -291,10 +294,9 @@ class SAM3RSSegmentor:
         # Get final prediction (argmax)
         bg_idx = 0 if self.config.bg_idx is None else self.config.bg_idx
 
-        # If background is in prompts but we want to exclude it from metric,
-        # set its logits to 0 so argmax won't select it
-        if self.config.use_prompted_background:
-            seg_logits[bg_idx] = 0
+        # Note: When use_prompted_background=True, background class is treated
+        # equally with other classes in argmax (no longer forced to 0).
+        # This allows the model to predict background as a valid class.
 
         # Use adaptive prob_threshold if available
         if adaptive_prob_thresholds is not None:
@@ -319,6 +321,10 @@ class SAM3RSSegmentor:
             if self.num_classes != self.num_prompts:
                 instance_logits_only = fuse_prompts_to_classes(instance_logits_only, self.query_indices, self.num_classes, self.num_prompts)
             instance_logits = instance_logits_only
+
+        # Clear intermediate tensors to save memory
+        del semantic_logits_only, instance_logits_only
+        torch.cuda.empty_cache()
 
         # Prepare result
         result = SegmentationResult(
