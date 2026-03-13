@@ -5,8 +5,13 @@ This demo demonstrates:
 - Using segmentor.predict_single() with different head configurations
 - Visualizing results based on head selection (semantic/instance/dual)
 - Saving results with clear naming for comparison
+
+Usage:
+    python demo.py --image /path/to/image.png --prompts configs/prompts_example.txt
+    python demo.py --image /path/to/image.png --checkpoint weights/sam3.pt --colormap loveda
 """
 
+import argparse
 import torch
 from PIL import Image
 import matplotlib.pyplot as plt
@@ -15,12 +20,6 @@ import os
 import sys
 
 from segmentor import SAM3RSSegmentor, InferenceConfig
-from workspace.configs.path_conf import ROOT_DIR, TEST_DIR
-from workspace.scripts.get_weights import get_weight_path
-from workspace.scripts.get_data import get_data_path
-
-SAM_RS_DIR = os.path.join(ROOT_DIR, "workspace/core/sam3-rs")
-sys.path.insert(0, SAM_RS_DIR)
 
 # Import colormaps
 from eval.colormaps import LOVEDA, OPENEARTHMAP, VAIHINGEN, POTSDAM, UAVID, ISAID
@@ -339,40 +338,81 @@ def run_single_inference(segmentor: SAM3RSSegmentor, image_path, output_dir, img
 
 
 def main():
-    """Main entry point for demo2."""
+    """Main entry point for demo."""
+
+    parser = argparse.ArgumentParser(description="SAM3-RS Demo")
+    parser.add_argument("--image_path", required=True, help="Path to input image")
+    parser.add_argument(
+        "--checkpoint",
+        default=os.path.join(os.path.dirname(__file__), "weights/sam3.pt"),
+        help="Path to SAM3 checkpoint",
+    )
+    parser.add_argument(
+        "--bpe",
+        default=os.path.join(os.path.dirname(__file__), "sam3/assets/bpe_simple_vocab_16e6.txt.gz"),
+        help="Path to BPE vocabulary file",
+    )
+    parser.add_argument(
+        "--prompts",
+        default=os.path.join(os.path.dirname(__file__), "configs/prompts_example.txt"),
+        help="Path to prompts file",
+    )
+    parser.add_argument(
+        "--output_dir",
+        default=os.path.join(os.path.dirname(__file__), "outputs/demo"),
+        help="Directory to save results",
+    )
+    parser.add_argument(
+        "--colormap",
+        default=DEFAULT_COLORMAP,
+        choices=list(COLORMAPS.keys()),
+        help="Colormap for visualization",
+    )
+    parser.add_argument(
+        "--device", default="cuda", help="Device (cuda or cpu)"
+    )
+    parser.add_argument(
+        "--slide_crop_size",
+        type=int,
+        default=0,
+        help="Sliding window crop size (0 = no sliding window)",
+    )
+    parser.add_argument(
+        "--confidence_threshold", type=float, default=0.5
+    )
+    parser.add_argument("--prob_threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--save_heatmap", action="store_true", help="Save per-class heatmaps"
+    )
+    parser.add_argument(
+        "--no_reduce_zero_label",
+        action="store_true",
+        help="Disable reduce_zero_label (keep 0-indexed predictions as-is)",
+    )
+    parser.add_argument(
+        "--use_prompted_background",
+        action="store_true",
+        help="Treat background as an explicit prompt class",
+    )
+    args = parser.parse_args()
 
     # ============ Configuration ============
-
-    # Get script directory
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
-    # Model paths
-    # checkpoint_path = get_weight_path("sam3")
-    checkpoint_path = os.path.join(SAM_RS_DIR, "weights/sam3/sam3.pt")
-    bpe_path = os.path.join(script_dir, "sam3", "assets", "bpe_simple_vocab_16e6.txt.gz")
+    checkpoint_path = args.checkpoint
+    bpe_path = args.bpe
+    test_image_path = args.image_path
+    prompts_file = args.prompts
+    output_dir = args.output_dir
+    reduce_zero_label = not args.no_reduce_zero_label
 
-    # Test image path
-    # dataset_path = get_data_path("LoveDA")
-    dataset_path = os.path.join(SAM_RS_DIR, "data/LoveDA")
-    test_image_path = os.path.join(dataset_path, "Exp/img/2531.png")
-
-    # Prompts file for multi-class segmentation
-    # prompts_file = os.path.join(script_dir, "configs/loveda_classes.txt")
-    prompts_file = os.path.join(script_dir, "configs/prompts_example.txt")
-
-    # Output directory
-    output_dir = os.path.join(TEST_DIR, "sam3", "head_comparison")
     os.makedirs(output_dir, exist_ok=True)
 
     # Get colormap for visualization
-    colormap = get_colormap(DEFAULT_COLORMAP)
+    colormap = get_colormap(args.colormap)
     colors = colors_from_colormap(colormap)
-    print(f"\nUsing colormap: {DEFAULT_COLORMAP}")
+    print(f"\nUsing colormap: {args.colormap}")
     print(f"Available colormaps: {', '.join(COLORMAPS.keys())}")
-
-    # Whether to restore original label format (add 1 to predictions)
-    # Set to True for LoveDA, False for datasets without reduce_zero_label
-    reduce_zero_label = True
 
     # ============ Initialize SAM3-RS Segmentor ============
 
@@ -383,17 +423,17 @@ def main():
     config = InferenceConfig(
         checkpoint_path=checkpoint_path,
         bpe_path=bpe_path,
-        device="cuda",
-        confidence_threshold=0.5,
-        prob_threshold=0.5,
+        device=args.device,
+        confidence_threshold=args.confidence_threshold,
+        prob_threshold=args.prob_threshold,
         use_semantic_head=True,
         use_instance_head=True,
         use_presence_score=True,
-        use_semantic_enhancement=False,  # Disabled due to suboptimal results
-        slide_crop_size=0,        # No sliding window for small images
+        use_semantic_enhancement=False,
+        slide_crop_size=args.slide_crop_size,
         slide_stride=1024,
         prompts_file=prompts_file,
-        use_prompted_background=True
+        use_prompted_background=args.use_prompted_background,
     )
 
     segmentor = SAM3RSSegmentor(config)
@@ -402,12 +442,22 @@ def main():
 
     img_name = os.path.splitext(os.path.basename(test_image_path))[0]
 
-    run_single_inference(segmentor, test_image_path, output_dir, img_name, save_heatmap=True, colors=colors, reduce_zero_label=reduce_zero_label, show_presence_scores=True)
+    run_single_inference(
+        segmentor,
+        test_image_path,
+        output_dir,
+        img_name,
+        save_heatmap=args.save_heatmap,
+        colors=colors,
+        reduce_zero_label=reduce_zero_label,
+        show_presence_scores=True,
+    )
 
     # ============ Summary ============
 
     print("\n" + "=" * 60)
-    print("Demo2 completed!")
+    print(f"Demo completed! Results saved to: {output_dir}")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

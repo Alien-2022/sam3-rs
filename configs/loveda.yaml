@@ -1,0 +1,53 @@
+# SAM3-RS Inference Configuration - LoveDA example
+# Load with: from segmentor_lib.config_loader import load_inference_config
+#            config = load_inference_config("configs/loveda.yaml")
+
+# ── Model ──────────────────────────────────────────────────────────────────
+checkpoint_path: weights/sam3.pt
+bpe_path: sam3/assets/bpe_simple_vocab_16e6.txt.gz
+
+# ── Inference ──────────────────────────────────────────────────────────────
+device: cuda
+confidence_threshold: 0.5
+prob_threshold: 0.1
+
+# Background class index in prediction maps (0 = first class = background)
+bg_idx: 0
+# True when "background" is explicitly listed in the prompts file
+use_prompted_background: false
+
+# ── Head selection ─────────────────────────────────────────────────────────
+use_semantic_head: true
+use_instance_head: true
+use_presence_score: false
+presence_score_mode: after_fusion   # "after_fusion" or "before_fusion"
+
+# ── Semantic enhancement ───────────────────────────────────────────────────
+# "false"          – use all synonyms (default)
+# "select_word"    – pick most representative synonym per class
+# "avg_embedding"  – average synonym embeddings per class
+semantic_enhancement_mode: "false"
+use_semantic_enhancement: false
+
+# ── Adaptive threshold ─────────────────────────────────────────────────────
+# null / "presence" / "class_specific" / "hybrid" / "image_feature"
+adaptive_threshold_strategy: null
+
+# ── Large image handling ───────────────────────────────────────────────────
+# Set slide_crop_size > 0 to enable sliding-window inference
+slide_crop_size: 0
+slide_stride: 512
+
+# Multi-scale inference (applied when slide_crop_size == 0)
+# Set to a list of floats to enable, e.g. [0.5, 1.0, 1.5]
+# null to disable
+multi_scale_factors: null
+multi_scale_merge_mode: avg   # "avg" or "max"
+
+# ── Prompts ────────────────────────────────────────────────────────────────
+prompts_file: configs/loveda_classes.txt
+
+# ── Debug ──────────────────────────────────────────────────────────────────
+debug_memory: false
+debug_log_file: null
+analyze_presence_score: false
