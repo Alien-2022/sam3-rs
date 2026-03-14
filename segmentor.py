@@ -383,15 +383,13 @@ class SAM3RSSegmentor:
         # 2. Get final prediction (argmax)
         bg_idx = 0 if self.config.bg_idx is None else self.config.bg_idx
 
-        # If background is in prompts but we want to exclude it from metric,
-        # set its logits to 0 so argmax won't select it
-        if self.config.use_prompted_background:
-            seg_logits = seg_logits.clone()
-            seg_logits[:, bg_idx] = 0
-
         # Unify prediction logic across batch
         # seg_logits: [B, num_classes, H, W]
-        if not self.config.use_prompted_background:
+        if self.config.use_prompted_background:
+            # Background IS in prompts: competes fairly in argmax
+            seg_pred = torch.argmax(seg_logits, dim=1)
+        else:
+            # Background is NOT in prompts: inject zero-logit background channel
             bg_pad = torch.zeros(
                 (batch_size, 1, *seg_logits.shape[2:]),
                 device=seg_logits.device,
@@ -399,8 +397,6 @@ class SAM3RSSegmentor:
             )
             logits_for_argmax = torch.cat([bg_pad, seg_logits], dim=1)
             seg_pred = torch.argmax(logits_for_argmax, dim=1)
-        else:
-            seg_pred = torch.argmax(seg_logits, dim=1)
 
         # Apply prob_threshold filtering (adaptive or fixed)
         if adaptive_prob_thresholds is not None:
