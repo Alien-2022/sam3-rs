@@ -1,6 +1,6 @@
-clutter
-road,pavement
-building
-grass
-tree
-car
+clutter,water body,tennis court,swimming pool,miscellaneous objects
+impervious surfaces,gray road,concrete pavement,asphalt surface,parking lot
+building,rectangular roof,commercial building,residential building,industrial structure
+low vegetation,grassland,bare soil,agricultural field,lawn
+tree,deciduous tree,coniferous tree,tree canopy,woodland
+car,vehicle,automobile,parked car,moving vehicle

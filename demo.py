@@ -14,13 +14,13 @@ import numpy as np
 import os
 import sys
 
-from segmentor import SAM3RSSegmentor, InferenceConfig
-from workspace.configs.path_conf import ROOT_DIR, TEST_DIR
-from workspace.scripts.get_weights import get_weight_path
-from workspace.scripts.get_data import get_data_path
+# Get script directory
+script_dir = os.path.dirname(os.path.abspath(__file__))
+SAM_RS_DIR = script_dir
+sys.path.insert(0, script_dir)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(script_dir))))
 
-SAM_RS_DIR = os.path.join(ROOT_DIR, "workspace/core/sam3-rs")
-sys.path.insert(0, SAM_RS_DIR)
+from segmentor import SAM3RSSegmentor, InferenceConfig
 
 # Import colormaps
 from eval.colormaps import LOVEDA, OPENEARTHMAP, VAIHINGEN, POTSDAM, UAVID, ISAID
@@ -71,101 +71,198 @@ def colors_from_colormap(colormap):
     return colors
 
 
-def save_prediction_mask(seg_pred, output_path, reduce_zero_label=True):
+def generate_random_colors(num_classes, seed=42, use_black_background=True):
     """
-    Save prediction mask.
+    Generate random distinct colors for visualization.
+
+    Args:
+        num_classes: Number of classes to generate colors for
+        seed: Random seed for reproducibility
+        use_black_background: If True, use black for class 0 (background)
+
+    Returns:
+        List of RGB colors (num_classes, 3)
+    """
+    np.random.seed(seed)
+
+    colors = []
+
+    if use_black_background and num_classes > 0:
+        # Use black for background (class 0)
+        colors.append([0, 0, 0])
+        remaining_classes = num_classes - 1
+        start_idx = 1
+    else:
+        remaining_classes = num_classes
+        start_idx = 0
+
+    if remaining_classes > 0:
+        # Use HSV color space to generate distinct colors for remaining classes
+        hues = np.linspace(0, 1, remaining_classes, endpoint=False)
+        saturations = np.random.uniform(0.7, 1.0, remaining_classes)
+        values = np.random.uniform(0.8, 1.0, remaining_classes)
+
+        for i in range(remaining_classes):
+            h, s, v = hues[i], saturations[i], values[i]
+
+            # HSV to RGB conversion
+            c = v * s
+            x = c * (1 - abs((h * 6) % 2 - 1))
+            m = v - c
+
+            if 0 <= h * 6 < 1:
+                r, g, b = c, x, 0
+            elif 1 <= h * 6 < 2:
+                r, g, b = x, c, 0
+            elif 2 <= h * 6 < 3:
+                r, g, b = 0, c, x
+            elif 3 <= h * 6 < 4:
+                r, g, b = 0, x, c
+            elif 4 <= h * 6 < 5:
+                r, g, b = x, 0, c
+            else:
+                r, g, b = c, 0, x
+
+            rgb = [int((r + m) * 255), int((g + m) * 255), int((b + m) * 255)]
+            colors.append(rgb)
+
+    return colors
+
+
+def save_prediction_mask(seg_pred, output_path):
+    """
+    Save prediction mask (raw segmentor output).
 
     Args:
         seg_pred: [H, W] numpy array with class IDs (segmentor output format)
         output_path: Path to save the mask
-        reduce_zero_label: Whether to restore original label format by adding 1
+
+    Note:
+        For demo/visualization purposes, we save the raw segmentor output directly
+        without any label format transformation. This keeps results consistent with
+        the prompts file (0=background, 1=first_class, etc.).
     """
-    # Segmentor output format (reduced):
-    # [background:0, building:1, road:2, water:3, barren:4, forest:5, agriculture:6]
-    #
-    # If need to save as original label format (aligned with original GT), need to:
-    # 1. Add 1 to predictions: [0-6] -> [1-7] (1=background, 2=building, ..., 7=agriculture)
-
-    if reduce_zero_label:
-        # Restore to original label format
-        seg_pred = seg_pred + 1  # [0-6] -> [1-7]
-
     mask = seg_pred.astype(np.uint8)
     pred_img = Image.fromarray(mask, mode="L")
     pred_img.save(output_path)
     print(f"  Saved: {os.path.basename(output_path)}")
 
 
-def save_colored_mask(seg_pred, colors, output_path, reduce_zero_label=True):
+def save_colored_mask(seg_pred, colors, output_path, label_map=None):
     """
-    Save colored segmentation mask.
+    Save colored segmentation mask with optional labels.
 
     Args:
-        seg_pred: [H, W] numpy array with class IDs
-        colors: List of RGB colors for each class
+        seg_pred: [H, W] numpy array with class IDs (segmentor output: 0=background, 1=class1, ...)
+        colors: List of RGB colors for each class (0=background, 1=class1, ...)
         output_path: Path to save the mask
-        reduce_zero_label: Whether seg_pred is in reduced format (0=background) or original format (0=no-data, 1=background)
+        label_map: Dict mapping class IDs to label names (optional, for legend)
+
+    Note:
+        Uses raw segmentor output format where colors[i] corresponds to class i.
     """
     h, w = seg_pred.shape
     colored_mask = np.zeros((h, w, 3), dtype=np.uint8)
 
-    for i, color in enumerate(colors):
-        # Adjust class ID based on reduce_zero_label
-        # If reduce_zero_label=True: seg_pred is [0:bg, 1:building, ...], need to map to colors[1:bg, 2:building, ...]
-        # If reduce_zero_label=False: seg_pred matches colors directly
-        if reduce_zero_label:
-            # Skip colors[0] (no-data) since seg_pred starts from background at index 0
-            class_idx = i - 1  # i=1(bg)->0, i=2(building)->1, etc.
-            if class_idx >= 0:
-                mask_area = seg_pred == class_idx
-                if mask_area.sum() > 0:
-                    colored_mask[mask_area] = color
-        else:
-            mask_area = seg_pred == i
-            if mask_area.sum() > 0:
-                colored_mask[mask_area] = color
+    # Get unique class IDs in the prediction
+    unique_classes = np.unique(seg_pred)
+
+    for class_id in unique_classes:
+        if class_id < 0 or class_id >= len(colors):
+            continue
+
+        mask_area = seg_pred == class_id
+        if mask_area.sum() > 0:
+            colored_mask[mask_area] = colors[class_id]
 
     mask_img = Image.fromarray(colored_mask)
-    mask_img.save(output_path)
+
+    # Add legend if label_map is provided
+    if label_map:
+        fig, ax = plt.subplots(figsize=(12, 8))
+        ax.imshow(colored_mask)
+        ax.axis('off')
+
+        # Build legend
+        legend_elements = []
+        for class_id in unique_classes:
+            if class_id < 0 or class_id >= len(colors):
+                continue
+            label = label_map.get(class_id, f"Class {class_id}")
+            color = [c/255.0 for c in colors[class_id]]
+            legend_elements.append(plt.Patch(facecolor=color, edgecolor='black', label=label))
+
+        ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.0, 1.0),
+                  fontsize=10, framealpha=0.9, edgecolor='black')
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight', pad_inches=0.1)
+        plt.close()
+    else:
+        mask_img.save(output_path)
+
     print(f"  Saved: {os.path.basename(output_path)}")
 
 
-def save_overlay(image, seg_pred, colors, output_path, alpha=0.5, reduce_zero_label=True):
+def save_overlay(image, seg_pred, colors, output_path, alpha=0.5, label_map=None):
     """
-    Save overlay of segmentation on original image.
+    Save overlay of segmentation on original image with optional labels.
 
     Args:
         image: PIL Image
-        seg_pred: [H, W] numpy array with class IDs
-        colors: List of RGB colors for each class
+        seg_pred: [H, W] numpy array with class IDs (segmentor output: 0=background, 1=class1, ...)
+        colors: List of RGB colors for each class (0=background, 1=class1, ...)
         output_path: Path to save the overlay
         alpha: Transparency of the mask (0-1)
-        reduce_zero_label: Whether seg_pred is in reduced format (0=background) or original format (0=no-data, 1=background)
+        label_map: Dict mapping class IDs to label names (optional, for legend)
+
+    Note:
+        Uses raw segmentor output format where colors[i] corresponds to class i.
     """
     h, w = seg_pred.shape
     colored_mask = np.zeros((h, w, 3), dtype=np.uint8)
 
-    for i, color in enumerate(colors):
-        # Adjust class ID based on reduce_zero_label
-        if reduce_zero_label:
-            # Skip colors[0] (no-data) since seg_pred starts from background at index 0
-            class_idx = i - 1
-            if class_idx >= 0:
-                mask_area = seg_pred == class_idx
-                if mask_area.sum() > 0:
-                    colored_mask[mask_area] = color
-        else:
-            mask_area = seg_pred == i
-            if mask_area.sum() > 0:
-                colored_mask[mask_area] = color
+    # Get unique class IDs in the prediction
+    unique_classes = np.unique(seg_pred)
+
+    for class_id in unique_classes:
+        if class_id < 0 or class_id >= len(colors):
+            continue
+
+        mask_area = seg_pred == class_id
+        if mask_area.sum() > 0:
+            colored_mask[mask_area] = colors[class_id]
 
     mask_rgb = Image.fromarray(colored_mask)
 
     if mask_rgb.size != image.size:
         mask_rgb = mask_rgb.resize(image.size, Image.Resampling.NEAREST)
 
-    overlay = Image.blend(image.convert("RGB"), mask_rgb, alpha=alpha)
-    overlay.save(output_path)
+    # Create overlay with matplotlib if label_map is provided
+    if label_map:
+        overlay_array = np.array(Image.blend(image.convert("RGB"), mask_rgb, alpha=alpha))
+
+        fig, ax = plt.subplots(figsize=(12, 8))
+        ax.imshow(overlay_array)
+        ax.axis('off')
+
+        # Build legend
+        legend_elements = []
+        for class_id in unique_classes:
+            if class_id < 0 or class_id >= len(colors):
+                continue
+            label = label_map.get(class_id, f"Class {class_id}")
+            color = [c/255.0 for c in colors[class_id]]
+            legend_elements.append(plt.Patch(facecolor=color, edgecolor='white', label=label))
+
+        ax.legend(handles=legend_elements, loc='upper right', bbox_to_anchor=(1.0, 1.0),
+                  fontsize=10, framealpha=0.9, edgecolor='white')
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight', pad_inches=0.1)
+        plt.close()
+    else:
+        overlay = Image.blend(image.convert("RGB"), mask_rgb, alpha=alpha)
+        overlay.save(output_path)
+
     print(f"  Saved: {os.path.basename(output_path)}")
 
 
@@ -288,9 +385,9 @@ def save_results_from_single_inference(image, result, base_name, colors, segment
     dual_pred = result.seg_pred.cpu().numpy()
     base_path = f"{base_name}_dual_head"
     print(f"  Saving dual_head results...")
-    save_prediction_mask(dual_pred, f"{base_path}_pred.png", reduce_zero_label=reduce_zero_label)
-    save_colored_mask(dual_pred, colors, f"{base_path}_color.png", reduce_zero_label=reduce_zero_label)
-    save_overlay(image, dual_pred, colors, f"{base_path}_overlay.png", reduce_zero_label=reduce_zero_label)
+    save_prediction_mask(dual_pred, f"{base_path}_pred.png")
+    save_colored_mask(dual_pred, colors, f"{base_path}_color.png")
+    save_overlay(image, dual_pred, colors, f"{base_path}_overlay.png")
 
     if save_heatmap:
         # Save semantic and instance logits heatmaps per class
@@ -305,7 +402,7 @@ def save_results_from_single_inference(image, result, base_name, colors, segment
         print_presence_scores(result, segmentor)
 
 
-def run_single_inference(segmentor: SAM3RSSegmentor, image_path, output_dir, img_name, colors, save_heatmap=False, reduce_zero_label=True, show_presence_scores=True):
+def run_single_inference(segmentor: SAM3RSSegmentor, image_path, output_dir, img_name, colors, save_heatmap=False, show_presence_scores=True):
     """
     Run inference once with dual head enabled, save all three results.
 
@@ -314,7 +411,12 @@ def run_single_inference(segmentor: SAM3RSSegmentor, image_path, output_dir, img
         image_path: Path to input image
         output_dir: Directory to save results
         img_name: Base name for output files
+        colors: Color palette for visualization (0=background, 1=class1, ...)
+        save_heatmap: Whether to save heatmaps
         show_presence_scores: Whether to print presence scores
+
+    Note:
+        Uses raw segmentor output format without label transformation.
     """
     # Load image
     image = Image.open(image_path).convert("RGB")
@@ -324,7 +426,7 @@ def run_single_inference(segmentor: SAM3RSSegmentor, image_path, output_dir, img
     print("Running Single Inference (Dual Head Enabled)")
     print("=" * 60)
 
-    result = segmentor.predict_single(image_path, detailed=True)  # Need detailed=True for presence scores
+    result = segmentor.predict_single(image_path, detailed=False)  # Need detailed=True for presence scores
 
     # Save all results from this single inference
     save_results_from_single_inference(
@@ -333,7 +435,6 @@ def run_single_inference(segmentor: SAM3RSSegmentor, image_path, output_dir, img
         colors=colors,
         segmentor=segmentor,
         save_heatmap=save_heatmap,
-        reduce_zero_label=reduce_zero_label,
         show_presence_scores=show_presence_scores,
     )
 
@@ -343,36 +444,30 @@ def main():
 
     # ============ Configuration ============
 
-    # Get script directory
+    # Script directory
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    SAM_RS_DIR = script_dir
+    TEST_DIR = os.path.join(SAM_RS_DIR, "test", "output")
 
     # Model paths
-    # checkpoint_path = get_weight_path("sam3")
     checkpoint_path = os.path.join(SAM_RS_DIR, "weights/sam3/sam3.pt")
     bpe_path = os.path.join(script_dir, "sam3", "assets", "bpe_simple_vocab_16e6.txt.gz")
 
     # Test image path
-    # dataset_path = get_data_path("LoveDA")
-    dataset_path = os.path.join(SAM_RS_DIR, "data/LoveDA")
-    test_image_path = os.path.join(dataset_path, "Exp/img/2531.png")
+    test_image_path = os.path.join(SAM_RS_DIR, "test/2522.png")
+
 
     # Prompts file for multi-class segmentation
-    # prompts_file = os.path.join(script_dir, "configs/loveda_classes.txt")
     prompts_file = os.path.join(script_dir, "configs/prompts_example.txt")
+
+    # Check if background is explicitly in prompts
+    with open(prompts_file, 'r') as f:
+        first_line = f.readline().strip().lower()
+        use_prompted_background = first_line == "background" or first_line.startswith("background")
 
     # Output directory
     output_dir = os.path.join(TEST_DIR, "sam3", "head_comparison")
     os.makedirs(output_dir, exist_ok=True)
-
-    # Get colormap for visualization
-    colormap = get_colormap(DEFAULT_COLORMAP)
-    colors = colors_from_colormap(colormap)
-    print(f"\nUsing colormap: {DEFAULT_COLORMAP}")
-    print(f"Available colormaps: {', '.join(COLORMAPS.keys())}")
-
-    # Whether to restore original label format (add 1 to predictions)
-    # Set to True for LoveDA, False for datasets without reduce_zero_label
-    reduce_zero_label = True
 
     # ============ Initialize SAM3-RS Segmentor ============
 
@@ -389,25 +484,54 @@ def main():
         use_semantic_head=True,
         use_instance_head=True,
         use_presence_score=True,
-        use_semantic_enhancement=False,  # Disabled due to suboptimal results
+        use_semantic_enhancement=False,
         slide_crop_size=0,        # No sliding window for small images
         slide_stride=1024,
         prompts_file=prompts_file,
-        use_prompted_background=True
+        use_prompted_background=use_prompted_background,
+        # Experimental features (disabled by default)
+        semantic_enhancement_mode="false",
     )
 
     segmentor = SAM3RSSegmentor(config)
+
+    print(f"\nPrompts mode: {'background explicitly prompted' if use_prompted_background else 'background via prob_threshold'}")
+
+    # Determine colormap (use random colors if not matching predefined datasets)
+    colormap = None
+    colors = None
+
+    # Try to use predefined colormap
+    colormap_name = None
+    for name in ["loveda", "openearthmap", "vaihingen", "potsdam", "uavid", "isaid"]:
+        if name.lower() in os.path.basename(prompts_file).lower():
+            colormap_name = name
+            break
+
+    if colormap_name:
+        colormap = get_colormap(colormap_name)
+        colors = colors_from_colormap(colormap)
+        print(f"\nUsing predefined colormap: {colormap_name}")
+    else:
+        # Generate random colors based on number of classes
+        # Class 0 = background (use black), class 1+ = other classes (random distinct colors)
+        num_classes = segmentor.num_classes
+        colors = generate_random_colors(num_classes, seed=42, use_black_background=True)
+        print(f"\nUsing random colors for {num_classes} classes (custom prompts)")
+        print(f"  colors[0] = background (black), colors[1...] = other classes")
+
+    print(f"Available colormaps: {', '.join(COLORMAPS.keys())}")
 
     # ============ Run Single Inference ============
 
     img_name = os.path.splitext(os.path.basename(test_image_path))[0]
 
-    run_single_inference(segmentor, test_image_path, output_dir, img_name, save_heatmap=True, colors=colors, reduce_zero_label=reduce_zero_label, show_presence_scores=True)
+    run_single_inference(segmentor, test_image_path, output_dir, img_name, save_heatmap=False, colors=colors, show_presence_scores=False)
 
     # ============ Summary ============
 
     print("\n" + "=" * 60)
-    print("Demo2 completed!")
+    print("Demo completed!")
 
 
 if __name__ == "__main__":

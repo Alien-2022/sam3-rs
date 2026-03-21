@@ -45,12 +45,36 @@ segmentor:
   presence_score_mode: "before_fusion"
 
   # ========================================
+  # TVP-Fusion: Text-Visual Dual-Prompt Fusion
+  # Best method from experiments (+2.53% IoU on Potsdam tree class)
+  # Works in both sliding window and single image modes.
+  # For single image mode (slide_crop_size=0), TVP-Fusion will use image dimensions.
+  # ========================================
+  enable_tvp_fusion: false  # Enable TVP-Fusion refinement
+  tvp_fusion_classes: ["tree"]  # Classes to refine
+  tvp_fusion_top_k: 100  # Number of top-k boxes (larger for global selection)
+  tvp_fusion_confidence: 0.5  # Minimum confidence threshold
+  tvp_fusion_min_box_area: 1000  # Minimum box area in pixels
+  tvp_fusion_box_expansion: 0.1  # Box expansion ratio (10%)
+  tvp_fusion_strategy: "max"  # Fusion strategy: "fixed", "confidence", "max" (best: max)
+  tvp_fusion_nms_iou: 0.5  # NMS IoU threshold
+
+  # ========================================
   # Statistics Analysis
   # ========================================
-  analyze_statistics: true  # Enable comprehensive statistics analysis
+  analyze_statistics: false  # Enable comprehensive statistics analysis
   compute_boundary_iou: false  # Enable boundary IoU computation (slower)
 
+  # ===== MEMORY PROFILING CONFIGURATION =====
+  # Enable detailed memory debugging
+  debug_memory: false
+  # Log file path for memory analysis (relative to project root)
+  debug_log_file: "assistant/memory_debug_eval.log"
+  
+  # sliding window parameters
+  # LoveDA images are 1024x1024, set to 0 for single image mode (no sliding window)
+  # TVP-Fusion will work in single image mode when slide_crop_size=0
 
 output:
-  # save_pred_dir: outputs/preds/loveda
+  save_pred_dir: outputs/preds/loveda
   metrics_json: outputs/metrics/loveda.json

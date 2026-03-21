@@ -20,6 +20,7 @@ from segmentor_lib.prompts import load_prompts, precompute_text_features
 from segmentor_lib.postprocess import fuse_prompts_to_classes, logits_to_pred, resize_logits
 from segmentor_lib.sliding_window import SlidingWindowInference
 from segmentor_lib.debug import MemoryDebugger
+from segmentor_lib.tvp_fusion import TVPFusionRefiner
 
 
 @dataclass
@@ -90,6 +91,16 @@ class InferenceConfig:
     debug_memory: bool = False  # Print memory usage information
     debug_log_file: Optional[str] = None  # Path to log file for debug output
     analyze_presence_score: bool = False  # Analyze and print presence score statistics
+
+    # TVP-Fusion: Text-Visual Dual-Prompt Fusion (best method from experiments)
+    enable_tvp_fusion: bool = False  # Enable TVP-Fusion refinement
+    tvp_fusion_classes: Optional[List[str]] = None  # Classes to refine (e.g., ["tree"])
+    tvp_fusion_top_k: int = 100  # Number of top boxes (larger than legacy refine_top_k)
+    tvp_fusion_confidence: float = 0.5  # Minimum confidence for boxes
+    tvp_fusion_min_box_area: int = 10000  # Minimum box area (larger for global boxes)
+    tvp_fusion_box_expansion: float = 0.1  # Box expansion factor
+    tvp_fusion_strategy: str = "max"  # Fusion strategy: "fixed", "confidence", "max"
+    tvp_fusion_nms_iou: float = 0.5  # NMS IoU threshold
 
 
 @dataclass
@@ -206,8 +217,40 @@ class SAM3RSSegmentor:
             processor=self.processor,
             prompts=self.prompts,
             config=config,
-            device=self.device
+            device=self.device,
         )
+
+        # Initialize TVP-Fusion refiner if enabled
+        self.tvp_fusion_refiner = None
+        self.tvp_fusion_prompt_indices = []
+        if config.enable_tvp_fusion:
+            self.tvp_fusion_refiner = TVPFusionRefiner(
+                processor=self.processor,
+                device=config.device,
+                top_k=config.tvp_fusion_top_k,
+                confidence_threshold=config.tvp_fusion_confidence,
+                min_box_area=config.tvp_fusion_min_box_area,
+                box_expansion=config.tvp_fusion_box_expansion,
+                fusion_strategy=config.tvp_fusion_strategy,
+                nms_iou_threshold=config.tvp_fusion_nms_iou,
+            )
+
+            # Map class names to prompt indices for TVP-Fusion
+            if config.tvp_fusion_classes:
+                for i, prompt_name in enumerate(self.prompts["names"]):
+                    for refine_class in config.tvp_fusion_classes:
+                        if refine_class.lower() in prompt_name.lower():
+                            self.tvp_fusion_prompt_indices.append(i)
+                            break
+            else:
+                # Default: refine all prompts
+                self.tvp_fusion_prompt_indices = list(range(self.num_prompts))
+
+            if self.tvp_fusion_prompt_indices:
+                print(f"✓ TVP-Fusion enabled for {len(self.tvp_fusion_prompt_indices)} prompts: "
+                      f"{[self.prompts['names'][i] for i in self.tvp_fusion_prompt_indices]}")
+
+        # Set text features cache for inference engine
         self.engine.text_features_cache = self.text_features_cache
 
 
@@ -240,7 +283,8 @@ class SAM3RSSegmentor:
             inference_func=self._inference_single_view,
             crop_size=self.config.slide_crop_size,
             stride=self.config.slide_stride,
-            device=self.device
+            device=self.device,
+            memory_debugger=self.debugger
         )
         return sliding_window(image, detailed, image_name)
 
@@ -262,6 +306,10 @@ class SAM3RSSegmentor:
         original_shape = (image.height, image.width)
         image_name = os.path.basename(image_path)
 
+        # TVP-Fusion requires detailed results to collect boxes
+        # Auto-enable detailed mode when TVP-Fusion is enabled
+        need_detailed = detailed or self.config.enable_tvp_fusion
+
         # Choose inference mode
         per_class_results = None
         adaptive_prob_thresholds = None
@@ -271,12 +319,12 @@ class SAM3RSSegmentor:
         ):
             # Use sliding window for large images
             seg_logits, per_class_results, semantic_logits_only, instance_logits_only, adaptive_prob_thresholds = self._sliding_window_inference(
-                image, detailed=detailed, image_name=image_name
+                image, detailed=need_detailed, image_name=image_name
             )
         else:
             # Single view inference
             seg_logits, per_class_results, semantic_logits_only, instance_logits_only, adaptive_prob_thresholds = self._inference_single_view(
-                image, detailed=detailed, image_name=image_name
+                image, detailed=need_detailed, image_name=image_name
             )
 
         # Resize logits to original shape
@@ -286,6 +334,53 @@ class SAM3RSSegmentor:
 
         # Clear cache after sliding window (helps with large images)
         torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+
+        # TVP-Fusion refinement for specified prompts (best method from experiments)
+        if self.config.enable_tvp_fusion and self.tvp_fusion_refiner and self.tvp_fusion_prompt_indices:
+            print(f"\n[TVP-Fusion] Refining {len(self.tvp_fusion_prompt_indices)} prompts...")
+
+            # Extract boxes from results (supports both sliding window and single image modes)
+            boxes_by_prompt = None
+            if per_class_results:
+                if "_boxes_by_prompt" in per_class_results:
+                    # Sliding window mode: boxes are already in the expected format
+                    boxes_by_prompt = per_class_results["_boxes_by_prompt"]
+                else:
+                    # Single image mode: convert per_class_results to boxes_by_prompt format
+                    boxes_by_prompt = {}
+                    for prompt_idx in self.tvp_fusion_prompt_indices:
+                        prompt_name = self.prompts["names"][prompt_idx]
+                        if prompt_name in per_class_results:
+                            class_data = per_class_results[prompt_name]
+                            if "boxes" in class_data and len(class_data["boxes"]) > 0:
+                                boxes_by_prompt[prompt_name] = {
+                                    "boxes": class_data["boxes"],
+                                    "scores": class_data["scores"]
+                                }
+
+            if boxes_by_prompt:
+                # Determine crop_size and stride for TVP-Fusion
+                # For single image mode, use image dimensions
+                tvp_crop_size = self.config.slide_crop_size if self.config.slide_crop_size > 0 else min(image.width, image.height)
+                tvp_stride = self.config.slide_stride if self.config.slide_stride > 0 else tvp_crop_size
+
+                # Run TVP-Fusion
+                seg_logits = self.tvp_fusion_refiner.run_tvp_fusion(
+                    image=image,
+                    seg_logits_text=seg_logits,
+                    boxes_by_prompt=boxes_by_prompt,
+                    refine_prompt_indices=self.tvp_fusion_prompt_indices,
+                    prompt_names=self.prompts["names"],
+                    crop_size=tvp_crop_size,
+                    stride=tvp_stride,
+                )
+
+                # Clean up
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            else:
+                print("  No boxes available, skipping TVP-Fusion")
 
         # Map prompts to actual class IDs (handle synonyms)
         if self.num_classes != self.num_prompts:

@@ -27,8 +27,26 @@ class MemoryDebugger:
 
     def debug_print(self, message: str):
         """Print debug message to log file only (not to console)."""
+        if not self.enabled or not self.log_handle:
+            return
+        self.log_handle.write(message + '\n')
+        self.log_handle.flush()
+
+    def log_cuda_memory(self, message: str):
+        """Log current CUDA memory allocation and reservation.
+
+        Args:
+            message: Context message describing the operation
+        """
+        if not self.enabled:
+            return
+
+        allocated = torch.cuda.memory_allocated() / 1024**3
+        reserved = torch.cuda.memory_reserved() / 1024**3
+        msg = f"[MEMORY] {message}: allocated={allocated:.2f} GB, reserved={reserved:.2f} GB"
+        self.debug_print(msg)
+        # Ensure flush after memory log
         if self.log_handle:
-            self.log_handle.write(message + '\n')
             self.log_handle.flush()
 
     def log_tensor_memory(self, name: str, tensor: torch.Tensor, detail: bool = False):
@@ -55,17 +73,3 @@ class MemoryDebugger:
             detail_msg = f"        min={tensor.min():.4f}, max={tensor.max():.4f}, " \
                          f"mean={tensor.mean():.4f}"
             self.debug_print(detail_msg)
-
-    def log_cuda_memory(self, message: str):
-        """Log current CUDA memory allocation and reservation.
-
-        Args:
-            message: Context message describing the operation
-        """
-        if not self.enabled:
-            return
-
-        allocated = torch.cuda.memory_allocated() / 1024**3
-        reserved = torch.cuda.memory_reserved() / 1024**3
-        msg = f"[MEMORY] {message}: allocated={allocated:.2f} GB, reserved={reserved:.2f} GB"
-        self.debug_print(msg)

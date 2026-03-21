@@ -39,7 +39,7 @@ def apply_semantic_enhancement(
         device: torch.device
         sim_threshold: Similarity threshold for filtering synonyms (0.0-1.0)
                      Synonyms with similarity < threshold will be filtered out.
-                     Set to 0.0 to disable filtering.
+                     Set to 0.0 to disable filtering.apply_semantic_enhancement
         min_synonyms: Minimum number of synonyms to keep after filtering.
                      Ensures at least this many synonyms are used for averaging.
 

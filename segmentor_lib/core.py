@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from PIL import Image
 from typing import List, Dict, Optional, Tuple
 import numpy as np
+from .debug import MemoryDebugger
 
 
 class InferenceEngine:
@@ -28,6 +29,12 @@ class InferenceEngine:
         self.device = device
         self.num_classes = max(prompts["indices"]) + 1 if prompts else 0
         self.num_prompts = len(prompts["names"]) if prompts else 0
+
+        # Initialize memory debugger
+        self.memory_debugger = MemoryDebugger(
+            enabled=getattr(config, 'debug_memory', False),
+            log_file=getattr(config, 'debug_log_file', None)
+        )
 
         # Convert class indices to tensor
         if prompts:
@@ -137,26 +144,82 @@ class InferenceEngine:
 
             # Process each prompt
             for prompt_idx, prompt_word in enumerate(self.prompts["names"]):
+                # 显存追踪：每个prompt开始
+                self.memory_debugger.debug_print(f"\n[PROMPT {prompt_idx}/{self.num_prompts}] {prompt_word}")
+                self.memory_debugger.log_cuda_memory(f"Prompt {prompt_idx} start: {prompt_word}")
+
                 # Reset prompts for clean inference
                 self.processor.reset_all_prompts(inference_state)
 
-                # Check if we have pre-computed average embeddings
+                # Get backbone_out for this image
+                backbone_out = inference_state["backbone_out"]
+
+                # Get class_id for this prompt
                 class_id = self.prompts["indices"][prompt_idx]
+
+                # Ensure geometric_prompt exists (needed for _forward_grounding)
+                if "geometric_prompt" not in inference_state:
+                    inference_state["geometric_prompt"] = self.processor.model._get_dummy_prompt()
+
+                output = None
+                # Priority 1: avg_embeddings (semantic enhancement with average)
                 if self.avg_embeddings and class_id in self.avg_embeddings:
-                    # Use pre-computed average embedding
                     avg_emb = self.avg_embeddings[class_id]
-                    inference_state["backbone_out"].update({
+                    backbone_out.update({
                         "language_features": avg_emb["language_features"],
                         "language_mask": avg_emb["language_mask"],
-                        "language_embeds": avg_emb["language_embeds"]
+                        "language_embeds": avg_emb["language_embeds"],
                     })
                     # Run grounding inference
+                    self.memory_debugger.log_cuda_memory(f"  [Before _forward_grounding] using avg_embeddings")
                     output = self.processor._forward_grounding(inference_state)
+                    self.memory_debugger.log_cuda_memory(f"  [After _forward_grounding] using avg_embeddings")
+                    if output and isinstance(output, dict):
+                        for k, v in output.items():
+                            if isinstance(v, torch.Tensor):
+                                self.memory_debugger.log_tensor_memory(f"  output.{k}", v)
+                # Priority 2: text_features_cache (standard pre-computation)
+                elif self.text_features_cache is not None and prompt_idx in self.text_features_cache:
+                    cached_features = self.text_features_cache[prompt_idx]
+                    backbone_out.update({
+                        "language_features": cached_features["language_features"],
+                        "language_mask": cached_features["language_mask"],
+                        "language_embeds": cached_features["language_embeds"],
+                    })
+                    # Run grounding inference
+                    self.memory_debugger.log_cuda_memory(f"  [Before _forward_grounding] using cached text features")
+                    output = self.processor._forward_grounding(inference_state)
+                    self.memory_debugger.log_cuda_memory(f"  [After _forward_grounding] using cached text features")
+                    if output and isinstance(output, dict):
+                        for k, v in output.items():
+                            if isinstance(v, torch.Tensor):
+                                self.memory_debugger.log_tensor_memory(f"  output.{k}", v)
                 else:
-                    # Use standard text prompt
+                    # Fallback to real-time text encoding
+                    self.memory_debugger.log_cuda_memory(f"  [Before set_text_prompt] real-time encoding")
                     output = self.processor.set_text_prompt(
                         state=inference_state, prompt=prompt_word
                     )
+                    self.memory_debugger.log_cuda_memory(f"  [After set_text_prompt] real-time encoding")
+
+                # Clean up output intermediate tensors to save memory
+                # Only keep what we need, but preserve semantic_seg if using semantic head
+                if output is not None:
+                    # Extract essential fields and discard the rest
+                    cleaned_output = {
+                        "masks_logits": output.get("masks_logits"),
+                        "pred_logits": output.get("pred_logits"),
+                        "pred_masks": output.get("pred_masks"),
+                        "presence_score": output.get("presence_score"),
+                        "pred_boxes": output.get("pred_boxes"),
+                        "scores": output.get("scores"),  # Needed for instance head
+                    }
+                    # Keep semantic_seg if semantic head is enabled
+                    if self.config.use_semantic_head and "semantic_seg" in output:
+                        cleaned_output["semantic_seg"] = output["semantic_seg"]
+                    output = cleaned_output
+
+                self.memory_debugger.log_cuda_memory(f"  [After cleaning output]")
 
                 # Apply adaptive thresholds if enabled
                 adaptive_confidence = None
@@ -185,15 +248,17 @@ class InferenceEngine:
                     "output": output
                 })
 
-                # Store per-class detailed results if requested (move to CPU to save GPU memory)
+                # Store per-class detailed results if requested
+                # Only collect boxes and scores for iterative visual prompt refinement
+                # Skipping masks, masks_logits, and semantic_logits to save time/memory
                 if detailed:
                     per_class_results[prompt_word] = {
-                        "masks": output["masks"].cpu(),
-                        "masks_logits": output["masks_logits"].cpu(),
-                        "boxes": output["boxes"].cpu(),
-                        "scores": output["scores"].cpu(),
-                        "semantic_logits": output["semantic_seg"].cpu(),
-                        "presence_score": output.get("presence_score", 1.0),
+                        # "masks": output["masks"].cpu(),  # Commented for performance
+                        # "masks_logits": output["masks_logits"].cpu(),  # Not needed for logit-level fusion
+                        "boxes": output.get("pred_boxes"),  # Keep on GPU for iterative refinement
+                        "scores": output.get("scores"),  # Keep on GPU for iterative refinement
+                        # "semantic_logits": output["semantic_seg"].cpu(),  # Commented for performance
+                        # "presence_score": output.get("presence_score", 1.0),  # Commented for performance
                     }
 
                 # ===== Dual-Head Fusion =====
@@ -263,9 +328,11 @@ class InferenceEngine:
                     del semantic_logits
                 del current_logits
 
-                # Periodic GPU cache cleanup
-                if (prompt_idx + 1) % 5 == 0:
-                    torch.cuda.empty_cache()
+                self.memory_debugger.log_cuda_memory(f"  [After deleting intermediate vars]")
+
+                # 显存使用日志
+                mem_usage_gb = torch.cuda.memory_allocated() / 1024**3
+                self.memory_debugger.debug_print(f"  [GC] current usage: {mem_usage_gb:.2f}GB")
 
         # Call after_inference hooks
         self._call_hooks('on_after_inference', {

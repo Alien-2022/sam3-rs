@@ -3,8 +3,8 @@ base_config: ./base.yaml
 dataset:
   name: vaihingen
   data_root: data/Vaihingen
-  img_dir: Exp/img
-  mask_dir: Exp/mask
+  img_dir: pre_slice/img
+  mask_dir: pre_slice/mask
   cls_file: cls_vaihingen.txt
   ignore_index: 255
   # Vaihingen dataset uses labels 0-5 for 6 classes:
@@ -18,6 +18,13 @@ dataset:
   # GT labels already align with segmentor output (no need for reduce_zero_label).
   reduce_zero_label: false
   data_key: null
+
+# Override base.yaml dataloader settings
+# Vaihingen images may have different sizes, use batch_size=1
+dataloader:
+  batch_size: 1
+  num_workers: 4
+  pin_memory: true
 
 segmentor:
   checkpoint_path: weights/sam3/sam3.pt
@@ -37,16 +44,35 @@ segmentor:
   # ========================================
   # Experimental Features (may be removed)
   # ========================================
-  semantic_enhancement_mode: "false"  # Options: "false", "select_word", "avg_embedding"
+  semantic_enhancement_mode: "avg_embedding"  # Options: "false", "select_word", "avg_embedding"
   adaptive_threshold_strategy: null  # Options: null, "presence", "class_specific", "hybrid"
   analyze_presence_score: false
-  presence_score_mode: "after_fusion"
+  presence_score_mode: "before_fusion"
+
+  # ========================================
+  # TVP-Fusion: Text-Visual Dual-Prompt Fusion
+  # Best method from experiments (+2.53% IoU on Potsdam tree class)
+  # ========================================
+  enable_tvp_fusion: false  # Enable TVP-Fusion refinement
+  tvp_fusion_classes: ["grass"]  # Classes to refine
+  tvp_fusion_top_k: 100  # Number of top-k boxes (larger for global selection)
+  tvp_fusion_confidence: 0.5  # Minimum confidence threshold
+  tvp_fusion_min_box_area: 10000  # Minimum box area in pixels
+  tvp_fusion_box_expansion: 0.1  # Box expansion ratio (10%)
+  tvp_fusion_strategy: "max"  # Fusion strategy: "fixed", "confidence", "max" (best: max)
+  tvp_fusion_nms_iou: 0.5  # NMS IoU threshold
 
   # ========================================
   # Statistics Analysis
   # ========================================
-  analyze_statistics: true  # Enable comprehensive statistics analysis
+  analyze_statistics: false  # Enable comprehensive statistics analysis
   compute_boundary_iou: false  # Enable boundary IoU computation (slower)
+
+  # sliding window parameters
+  # Vaihingen images are ~2000x2500, can be processed directly without sliding window
+  # Use slide_crop_size: 0 for direct processing, or 2048 with stride 1024 for sliding
+  slide_crop_size: 1024
+  slide_stride: 512
 
 output:
   # save_pred_dir: outputs/preds/vaihingen
