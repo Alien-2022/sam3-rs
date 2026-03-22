@@ -484,7 +484,6 @@ def main():
         use_semantic_head=True,
         use_instance_head=True,
         use_presence_score=True,
-        use_semantic_enhancement=False,
         slide_crop_size=0,        # No sliding window for small images
         slide_stride=1024,
         prompts_file=prompts_file,

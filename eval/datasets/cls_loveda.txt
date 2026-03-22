@@ -1,7 +1,7 @@
-background,unclassified area,mixed pixels,undefined terrain,heterogeneous region
-building,building roof,building cluster,rectangular roof,impervious surface
-road,road network,paved surface,linear road,street pattern
-water,water body,river,pond,reservoir
-barren,barren land,bare soil,unused land,desert ground
-forest,tree canopy,woodland,forest cover,dense vegetation
-agricultural,farmland,cultivated land,crop field,agricultural plot
+background
+building
+road
+water
+barren
+forest
+agricultural
