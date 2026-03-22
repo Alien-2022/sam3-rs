@@ -21,8 +21,7 @@ workspace/core/sam3-rs/
     ├── debug.py              # 内存调试工具
     └── experimental/         # 实验性功能（可插拔）
         ├── __init__.py       # 实验模块入口
-        ├── semantic_enhancement.py  # 语义增强
-        └── adaptive_threshold.py    # 动态阈值策略
+        └── semantic_enhancement.py  # 语义增强
 ```
 
 ## 模块说明
@@ -101,16 +100,6 @@ workspace/core/sam3-rs/
 - `apply_semantic_enhancement_with_avg_embedding(...)` - 平均嵌入模式
 - `get_semantic_enhancer(mode)` - 工厂函数
 
-#### 2. experimental/adaptive_threshold.py - 动态阈值
-基于 presence score 或图像特征动态调整阈值。
-
-**主要类：**
-- `PresenceScoreAdaptiveThreshold` - 基于 presence score 调整
-- `ClassSpecificAdaptiveThreshold` - 类别特定阈值
-- `HybridAdaptiveThreshold` - 混合策略
-- `ImageFeatureAdaptiveThreshold` - 基于图像特征调整
-- `get_adaptive_threshold_strategy(strategy_name, ...)` - 工厂函数
-
 ---
 
 ## 使用方式
@@ -160,9 +149,6 @@ if analyzer:
 ```python
 # 语义增强
 config.semantic_enhancement_mode = "select_word"  # 或 "avg_embedding"
-
-# 动态阈值
-config.adaptive_threshold_strategy = "presence"
 ```
 
 ### 4. 启用调试功能

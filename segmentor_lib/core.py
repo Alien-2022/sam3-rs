@@ -48,18 +48,6 @@ class InferenceEngine:
         else:
             self.avg_embeddings = None
 
-        # Initialize adaptive threshold strategy (experimental feature)
-        self.adaptive_threshold = None
-        if hasattr(config, 'adaptive_threshold_strategy') and config.adaptive_threshold_strategy:
-            from .experimental.adaptive_threshold import get_adaptive_threshold_strategy
-            self.adaptive_threshold = get_adaptive_threshold_strategy(
-                strategy_name=config.adaptive_threshold_strategy,
-                base_confidence=config.confidence_threshold,
-                base_prob=config.prob_threshold,
-                class_configs=getattr(config, 'class_thresholds', None)
-            )
-            print(f"✓ Adaptive threshold strategy enabled: {config.adaptive_threshold_strategy}")
-
         # Initialize analyzers
         self.analyzers = []
         self._init_analyzers(config)
@@ -221,25 +209,6 @@ class InferenceEngine:
 
                 self.memory_debugger.log_cuda_memory(f"  [After cleaning output]")
 
-                # Apply adaptive thresholds if enabled
-                adaptive_confidence = None
-                adaptive_prob = None
-                if self.adaptive_threshold is not None:
-                    # Get presence score for this prompt
-                    presence_score = output.get("presence_score", 0.5)
-                    if isinstance(presence_score, torch.Tensor):
-                        presence_score = presence_score.item()
-
-                    class_id = self.prompts["indices"][prompt_idx]
-                    adaptive_confidence, adaptive_prob = self.adaptive_threshold.compute_thresholds(
-                        presence_scores=torch.tensor([presence_score]),
-                        class_id=class_id
-                    )
-
-                    # Update processor's confidence threshold for subsequent operations
-                    original_confidence = self.processor.confidence_threshold
-                    self.processor.set_confidence_threshold(adaptive_confidence, inference_state)
-
                 # Call after_prompt hooks
                 self._call_hooks('on_after_prompt', {
                     "prompt_idx": prompt_idx,
@@ -346,31 +315,7 @@ class InferenceEngine:
                 if isinstance(inference_state[key], torch.Tensor):
                     del inference_state[key]
 
-        # Store adaptive thresholds for each class (if enabled)
-        adaptive_prob_thresholds = None
-        if self.adaptive_threshold is not None:
-            adaptive_prob_thresholds = {}
-            # First collect all presence scores for each class
-            class_presence_scores = {}
-            for prompt_idx, prompt_word in enumerate(self.prompts["names"]):
-                if prompt_word in per_class_results:
-                    presence_score = per_class_results[prompt_word].get("presence_score", 0.5)
-                    if isinstance(presence_score, torch.Tensor):
-                        presence_score = presence_score.item()
-                    class_id = self.prompts["indices"][prompt_idx]
-                    if class_id not in class_presence_scores:
-                        class_presence_scores[class_id] = []
-                    class_presence_scores[class_id].append(presence_score)
-            
-            # Then compute adaptive threshold for each class using average presence score
-            for class_id, presence_scores in class_presence_scores.items():
-                _, adaptive_prob = self.adaptive_threshold.compute_thresholds(
-                    presence_scores=torch.tensor(presence_scores),
-                    class_id=class_id
-                )
-                adaptive_prob_thresholds[class_id] = adaptive_prob
-
-        return seg_logits, per_class_results, semantic_logits_only, instance_logits_only, adaptive_prob_thresholds
+        return seg_logits, per_class_results, semantic_logits_only, instance_logits_only, None
 
     def inference_batch_view(
         self, images: List[Image.Image], detailed: bool = False, image_names: Optional[List[str]] = None
@@ -413,9 +358,6 @@ class InferenceEngine:
             batch_seg_logits = torch.zeros(
                 (batch_size, self.num_prompts, h_orig, w_orig), device=self.device
             )
-
-            # Store presence scores for each prompt if adaptive threshold is enabled
-            batch_presence_scores = {}  # {prompt_idx: [B] presence scores}
 
             # Construct FindStage for batch mode
             find_stage = FindStage(
@@ -492,12 +434,6 @@ class InferenceEngine:
                 out_masks = outputs["pred_masks"]
                 out_probs = out_logits.sigmoid()
                 presence_score = outputs["presence_logit_dec"].sigmoid().unsqueeze(1)
-
-                # Store presence scores for adaptive threshold computation
-                if self.adaptive_threshold is not None:
-                    # presence_score: [B, 1, 1] -> [B] (ensure it's always a list)
-                    scores = presence_score.squeeze().squeeze().cpu()
-                    batch_presence_scores[prompt_idx] = scores.tolist() if scores.numel() > 1 else [scores.item()]
 
                 # [B, 200]
                 out_probs = (out_probs * presence_score).squeeze(-1)
@@ -581,30 +517,6 @@ class InferenceEngine:
             "mode": "batch_view"
         })
 
-        # Compute adaptive thresholds for each class (if enabled)
-        adaptive_prob_thresholds = None
-        if self.adaptive_threshold is not None:
-            adaptive_prob_thresholds = {}
-            class_presence_scores = {}
-
-            # Collect presence scores for each class from stored batch presence scores
-            for prompt_idx, prompt_word in enumerate(self.prompts["names"]):
-                class_id = self.prompts["indices"][prompt_idx]
-
-                if prompt_idx in batch_presence_scores:
-                    if class_id not in class_presence_scores:
-                        class_presence_scores[class_id] = []
-                    # Add presence scores for this prompt (same class)
-                    class_presence_scores[class_id].extend(batch_presence_scores[prompt_idx])
-
-            # Compute adaptive thresholds for each class
-            for class_id, presence_scores in class_presence_scores.items():
-                _, adaptive_prob = self.adaptive_threshold.compute_thresholds(
-                    presence_scores=torch.tensor(presence_scores),
-                    class_id=class_id
-                )
-                adaptive_prob_thresholds[class_id] = adaptive_prob
-
         # Clean up backbone_out to free GPU memory
         if 'backbone_out' in dir():
             for key in list(backbone_out.keys()):
@@ -612,7 +524,7 @@ class InferenceEngine:
                     del backbone_out[key]
         torch.cuda.empty_cache()
 
-        return batch_seg_logits, [{} for _ in range(batch_size)], None, None, adaptive_prob_thresholds
+        return batch_seg_logits, [{} for _ in range(batch_size)], None, None, None
 
     def set_text_features_cache(self, cache: Optional[Dict]):
         """Set the pre-computed text features cache."""
