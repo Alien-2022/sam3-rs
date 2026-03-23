@@ -49,15 +49,10 @@ class SlidingWindowInference:
         count_map = None
         semantic_logits_sum = None
         instance_logits_sum = None
-        per_class_results = {}
 
-        # Collect boxes and scores for iterative visual prompt refinement
-        # Format: {prompt_name: {"boxes": [N, 4], "scores": [N]}}
-        boxes_by_prompt = None
-        # Always collect boxes when detailed=True (for visualization/debugging)
-        # Only use for iterative refinement when enabled in config
-        if detailed:
-            boxes_by_prompt = {}
+        # Collect boxes and scores from all crops (only if detailed=True)
+        # Format: {prompt_name: {"boxes": [[N1,4], [N2,4], ...], "scores": [[N1], [N2], ...]}}
+        boxes_accumulator = {} if detailed else None
 
         # Process each crop
         adaptive_prob_thresholds_list = []
@@ -86,10 +81,9 @@ class SlidingWindowInference:
                     # Extract crop
                     crop = image.crop((x1, y1, x2, y2))
 
-                    # Run inference on crop (always collect detailed results when boxes_by_prompt is set)
-                    collect_detailed = (boxes_by_prompt is not None)
+                    # Run inference on crop (always collect detailed results when detailed=True)
                     crop_seg_logits, crop_per_class, crop_semantic, crop_instance, crop_adaptive = self.inference_func(
-                        crop, detailed=collect_detailed, image_name=f"{image_name}_crop_{crop_y}_{crop_x}"
+                        crop, detailed=detailed, image_name=f"{image_name}_crop_{crop_y}_{crop_x}"
                     )
 
                     if self.memory_debugger:
@@ -128,30 +122,50 @@ class SlidingWindowInference:
                         semantic_logits_sum[:, y1:y2, x1:x2] += crop_semantic
                     if crop_instance is not None:
                         instance_logits_sum[:, y1:y2, x1:x2] += crop_instance
+                    
+                    # Debug: Track max values during accumulation (every 5 crops)
+                    if crop_idx % 5 == 0:
+                        print(f"\n[DEBUG sliding_window.py] After crop {crop_idx}:")
+                        print(f"  crop_seg_logits max: {crop_seg_logits.max():.6f}")
+                        # Check per-channel max
+                        for ch in range(crop_seg_logits.shape[0]):
+                            ch_max = crop_seg_logits[ch].max().item()
+                            if ch_max > 0.5:  # Only print channels with significant values
+                                print(f"    Channel {ch} max: {ch_max:.6f}")
+                        print(f"  seg_logits_sum max: {seg_logits_sum.max():.6f}")
+                        print(f"  count_map max: {count_map.max():.6f}")
+                        # Check if any position has sum > 1.0
+                        over_one = (seg_logits_sum > 1.0).sum().item()
+                        if over_one > 0:
+                            print(f"  WARNING: {over_one} positions have sum > 1.0!")
+                            # Find one example
+                            over_one_mask = seg_logits_sum > 1.0
+                            if over_one_mask.any():
+                                idx = torch.where(over_one_mask)
+                                c, y, x = idx[0][0].item(), idx[1][0].item(), idx[2][0].item()
+                                print(f"    Example at ({c}, {y}, {x}): sum={seg_logits_sum[c, y, x]:.6f}, count={count_map[y, x]:.6f}")
 
-                    # Collect boxes from this crop and transform to global coordinates (only if needed)
-                    if boxes_by_prompt is not None and crop_per_class:
+                    # Collect boxes from this crop and transform to global coordinates
+                    if crop_per_class and boxes_accumulator is not None:
                         for prompt_name, class_data in crop_per_class.items():
-                            if prompt_name not in boxes_by_prompt:
-                                boxes_by_prompt[prompt_name] = {"boxes": [], "scores": []}
+                            if prompt_name not in boxes_accumulator:
+                                boxes_accumulator[prompt_name] = {"boxes": [], "scores": []}
 
                             crop_boxes = class_data["boxes"]  # [N, 4] in crop coordinates
                             crop_scores = class_data["scores"]  # [N]
 
                             # Transform boxes from crop coordinates to global coordinates
                             # boxes are in [x1, y1, x2, y2] format
-                            if len(crop_boxes) > 0:
+                            if crop_boxes is not None and len(crop_boxes) > 0:
                                 # Clone to avoid inplace update
                                 crop_boxes = crop_boxes.clone()
                                 crop_boxes[:, [0, 2]] += x1  # Add x offset
                                 crop_boxes[:, [1, 3]] += y1  # Add y offset
 
-                                boxes_by_prompt[prompt_name]["boxes"].append(crop_boxes)
-                                boxes_by_prompt[prompt_name]["scores"].append(crop_scores)
+                                boxes_accumulator[prompt_name]["boxes"].append(crop_boxes)
+                                boxes_accumulator[prompt_name]["scores"].append(crop_scores)
 
-                    # Merge detailed results (only store first crop to avoid excessive memory)
-                    if detailed and crop_per_class and not per_class_results:
-                        per_class_results = crop_per_class
+
 
                     # Free crop tensors to reduce memory
                     del crop_seg_logits, crop_per_class, crop_semantic, crop_instance, crop_adaptive, crop
@@ -173,23 +187,136 @@ class SlidingWindowInference:
         seg_logits = seg_logits_sum / count_map.unsqueeze(0).to(torch.bfloat16)
         semantic_logits = semantic_logits_sum / count_map.unsqueeze(0).to(torch.bfloat16) if semantic_logits_sum is not None else None
         instance_logits = instance_logits_sum / count_map.unsqueeze(0).to(torch.bfloat16) if instance_logits_sum is not None else None
+        
+        # Debug: Check final seg_logits
+        print(f"\n[DEBUG sliding_window.py] Final seg_logits:")
+        print(f"  Overall range: [{seg_logits.min():.6f}, {seg_logits.max():.6f}]")
+        num_ones = (seg_logits == 1.0).sum().item()
+        total = seg_logits.numel()
+        print(f"  Pixels == 1.0: {num_ones} / {total} ({100*num_ones/total:.4f}%)")
+        print(f"  seg_logits_sum max: {seg_logits_sum.max():.6f}")
+        print(f"  count_map max: {count_map.max():.6f}")
+        print(f"  count_map min: {count_map.min():.6f}")
+        
+        # Per-channel analysis
+        print(f"\n  Per-channel max:")
+        for ch in range(seg_logits.shape[0]):
+            ch_max = seg_logits[ch].max().item()
+            ch_ones = (seg_logits[ch] == 1.0).sum().item()
+            print(f"    Channel {ch}: max={ch_max:.6f}, ones={ch_ones}")
+        
+        # Detailed analysis of 1.0 values
+        if num_ones > 0:
+            ones_mask = (seg_logits == 1.0)
+            # Find positions where seg_logits == 1.0
+            idx = torch.where(ones_mask)
+            c, y, x = idx[0][0].item(), idx[1][0].item(), idx[2][0].item()
+            print(f"\n  Detailed analysis of first 1.0 pixel at ({c}, {y}, {x}):")
+            print(f"    seg_logits_sum = {seg_logits_sum[c, y, x]:.6f}")
+            print(f"    count_map = {count_map[y, x]:.6f}")
+            print(f"    Average = {seg_logits[c, y, x]:.6f}")
+            # Check neighboring pixels
+            y_start, y_end = max(0, y-1), min(h, y+2)
+            x_start, x_end = max(0, x-1), min(w, x+2)
+            print(f"    Neighborhood count_map:\n{count_map[y_start:y_end, x_start:x_end]}")
+            print(f"    Neighborhood seg_logits_sum:\n{seg_logits_sum[c, y_start:y_end, x_start:x_end]}")
 
-        # Concatenate boxes and scores from all crops (only if boxes were collected)
-        if boxes_by_prompt is not None:
-            for prompt_name in boxes_by_prompt:
-                if boxes_by_prompt[prompt_name]["boxes"]:
-                    boxes_by_prompt[prompt_name]["boxes"] = torch.cat(
-                        boxes_by_prompt[prompt_name]["boxes"], dim=0
-                    )
-                    boxes_by_prompt[prompt_name]["scores"] = torch.cat(
-                        boxes_by_prompt[prompt_name]["scores"], dim=0
-                    )
+        # Merge boxes and scores from all crops and apply NMS to remove duplicates
+        per_class_results = {}
+        if boxes_accumulator is not None:
+            for prompt_name in boxes_accumulator:
+                if boxes_accumulator[prompt_name]["boxes"]:
+                    # Concatenate all crop boxes and scores
+                    all_boxes = torch.cat(boxes_accumulator[prompt_name]["boxes"], dim=0)
+                    all_scores = torch.cat(boxes_accumulator[prompt_name]["scores"], dim=0)
 
-            # Store boxes in per_class_results (always available when detailed=True)
-            # Used for both visualization/debugging and iterative refinement
-            per_class_results["_boxes_by_prompt"] = boxes_by_prompt
+                    # Apply NMS to remove duplicate detections across crops
+                    keep = self._apply_nms(all_boxes, all_scores, iou_threshold=0.5)
+
+                    per_class_results[prompt_name] = {
+                        "boxes": all_boxes[keep],
+                        "scores": all_scores[keep],
+                    }
+                else:
+                    # No boxes found for this class across all crops
+                    per_class_results[prompt_name] = {
+                        "boxes": None,
+                        "scores": torch.tensor([], device=self.device, dtype=torch.bfloat16),
+                    }
 
         # Return adaptive thresholds from first crop (or None if not available)
         adaptive_prob_thresholds = adaptive_prob_thresholds_list[0] if adaptive_prob_thresholds_list else None
 
         return seg_logits, per_class_results, semantic_logits, instance_logits, adaptive_prob_thresholds
+
+    def _apply_nms(self, boxes: torch.Tensor, scores: torch.Tensor, iou_threshold: float = 0.5) -> torch.Tensor:
+        """Apply Non-Maximum Suppression to remove duplicate detections.
+
+        Args:
+            boxes: [N, 4] tensor of boxes in [x1, y1, x2, y2] format
+            scores: [N] tensor of confidence scores
+            iou_threshold: IOU threshold for suppression
+
+        Returns:
+            keep: indices of boxes to keep
+        """
+        if boxes.shape[0] == 0:
+            return torch.tensor([], dtype=torch.long, device=boxes.device)
+
+        # Sort boxes by score (highest first)
+        sorted_indices = torch.argsort(scores, descending=True)
+        keep = []
+
+        while sorted_indices.shape[0] > 0:
+            # Keep the highest scoring box
+            current = sorted_indices[0]
+            keep.append(current.item())
+
+            if sorted_indices.shape[0] == 1:
+                break
+
+            # Calculate IoU with remaining boxes
+            current_box = boxes[current]
+            remaining_boxes = boxes[sorted_indices[1:]]
+
+            # Compute IoU
+            ious = self._calculate_iou(current_box.unsqueeze(0), remaining_boxes)
+
+            # Keep boxes with IoU below threshold
+            mask = ious.squeeze(0) < iou_threshold  # [1, M] -> [M]
+            sorted_indices = sorted_indices[1:][mask]
+
+        return torch.tensor(keep, dtype=torch.long, device=boxes.device)
+
+    def _calculate_iou(self, boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
+        """Calculate IoU between two sets of boxes.
+
+        Args:
+            boxes1: [N, 4] tensor
+            boxes2: [M, 4] tensor
+
+        Returns:
+            iou: [N, M] tensor of IoU values
+        """
+        # Expand for broadcasting: [N, 1, 4] and [1, M, 4]
+        boxes1 = boxes1.unsqueeze(1)
+        boxes2 = boxes2.unsqueeze(0)
+
+        # Calculate intersection
+        x1 = torch.max(boxes1[..., 0], boxes2[..., 0])
+        y1 = torch.max(boxes1[..., 1], boxes2[..., 1])
+        x2 = torch.min(boxes1[..., 2], boxes2[..., 2])
+        y2 = torch.min(boxes1[..., 3], boxes2[..., 3])
+
+        intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
+
+        # Calculate areas
+        area1 = (boxes1[..., 2] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 1])
+        area2 = (boxes2[..., 2] - boxes2[..., 0]) * (boxes2[..., 3] - boxes2[..., 1])
+
+        union = area1 + area2 - intersection
+
+        # Avoid division by zero
+        iou = intersection / (union + 1e-6)
+
+        return iou

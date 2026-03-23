@@ -132,12 +132,19 @@ def build_segmentor(seg_cfg: Dict[str, Any]) -> SAM3RSSegmentor:
     infer_kwargs.pop("compute_boundary_iou", None)
     infer_kwargs.pop("analyze_presence_score", None)
 
+    # Handle prob_thresholds: convert dict keys to int if needed
+    prob_thresholds = infer_kwargs.pop("prob_thresholds", None)
+    if prob_thresholds is not None:
+        # Convert string keys to int (YAML may load dict keys as strings)
+        prob_thresholds = {int(k): v for k, v in prob_thresholds.items()}
+
     infer_cfg = InferenceConfig(
         checkpoint_path=infer_kwargs.pop("checkpoint_path"),
         bpe_path=infer_kwargs.pop("bpe_path"),
         device=infer_kwargs.pop("device", "cuda"),
         debug_memory=debug_memory,
         debug_log_file=debug_log_file,
+        prob_thresholds=prob_thresholds,
         **infer_kwargs,
     )
     return SAM3RSSegmentor(infer_cfg)
@@ -344,8 +351,8 @@ def main() -> None:
             print(f"[eval] {processed}/{total_imgs} images done | Data: {t_data/(processed/8+1e-6):.3f}s/b | Infer: {t_infer/processed:.3f}s/i | Eval: {t_eval/processed:.3f}s/i", end="\r")
         t_eval += (time.time() - t_eval_start)
 
-        if processed >= 20:
-            break
+        # if processed >= 2:
+        #     break
         t_start_loop = time.time()
 
         # 定期清理 GPU 缓存 - 每 5 个 batch 清理一次，避免频繁清理影响性能

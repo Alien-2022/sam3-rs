@@ -101,6 +101,8 @@ class InferenceEngine:
         w, h = image.size
         seg_logits = torch.zeros((self.num_prompts, h, w), device=self.device)
         per_class_results = {}
+        self._debug_logged = False  # Debug flag for before fusion
+        self._debug_after_logged = False  # Debug flag for after fusion
 
         # Initialize separate logits for individual heads
         if self.config.use_semantic_head:
@@ -199,7 +201,7 @@ class InferenceEngine:
                         "pred_logits": output.get("pred_logits"),
                         "pred_masks": output.get("pred_masks"),
                         "presence_score": output.get("presence_score"),
-                        "pred_boxes": output.get("pred_boxes"),
+                        "boxes": output.get("boxes"),  # boxes from processor (filtered by confidence_threshold)
                         "scores": output.get("scores"),  # Needed for instance head
                     }
                     # Keep semantic_seg if semantic head is enabled
@@ -224,7 +226,7 @@ class InferenceEngine:
                     per_class_results[prompt_word] = {
                         # "masks": output["masks"].cpu(),  # Commented for performance
                         # "masks_logits": output["masks_logits"].cpu(),  # Not needed for logit-level fusion
-                        "boxes": output.get("pred_boxes"),  # Keep on GPU for iterative refinement
+                        "boxes": output.get("boxes"),  # Keep on GPU for iterative refinement
                         "scores": output.get("scores"),  # Keep on GPU for iterative refinement
                         # "semantic_logits": output["semantic_seg"].cpu(),  # Commented for performance
                         # "presence_score": output.get("presence_score", 1.0),  # Commented for performance
@@ -259,6 +261,13 @@ class InferenceEngine:
 
                             inst_current = torch.max(inst_current, inst_logits * inst_score)
 
+                    # Debug: Check instance head output
+                    if prompt_idx == 0 and not self._debug_logged:
+                        print(f"\n[DEBUG core.py] Instance head:")
+                        print(f"  inst_current range: [{inst_current.min():.6f}, {inst_current.max():.6f}]")
+                        num_ones = (inst_current == 1.0).sum().item()
+                        print(f"  inst_current pixels == 1.0: {num_ones}")
+                    
                     current_logits = torch.max(current_logits, inst_current)
                     instance_logits_only[prompt_idx] = inst_current
 
@@ -276,11 +285,32 @@ class InferenceEngine:
                     # Apply presence score to semantic head if enabled
                     if self.config.use_presence_score and self.config.presence_score_mode == "before_fusion":
                         presence_score = output.get("presence_score", 0)
+                        # Debug: 打印 presence_score 和 semantic_logits 的值
+                        if prompt_idx == 0 and hasattr(self, '_debug_logged'):
+                            if not self._debug_logged:
+                                print(f"\n[DEBUG core.py] Before fusion:")
+                                print(f"  presence_score: {presence_score} (type: {type(presence_score)})")
+                                print(f"  semantic_logits range: [{semantic_logits.min():.6f}, {semantic_logits.max():.6f}]")
+                                print(f"  semantic_logits mean: {semantic_logits.mean():.6f}")
+                                # 检查 semantic_logits 中等于 1.0 的像素
+                                num_ones = (semantic_logits == 1.0).sum().item()
+                                total = semantic_logits.numel()
+                                print(f"  semantic_logits pixels == 1.0: {num_ones} / {total} ({100*num_ones/total:.4f}%)")
+                                self._debug_logged = True
                         semantic_logits = semantic_logits * presence_score
 
                     # Fusion: take max of instance and semantic predictions
                     current_logits = torch.max(current_logits, semantic_logits)
                     semantic_logits_only[prompt_idx] = semantic_logits
+                    
+                    # Debug: Check after fusion
+                    if prompt_idx == 0 and hasattr(self, '_debug_after_logged'):
+                        if not self._debug_after_logged:
+                            print(f"\n[DEBUG core.py] After fusion:")
+                            print(f"  current_logits range: [{current_logits.min():.6f}, {current_logits.max():.6f}]")
+                            num_ones = (current_logits == 1.0).sum().item()
+                            print(f"  current_logits pixels == 1.0: {num_ones}")
+                            self._debug_after_logged = True
 
                 # 3. Presence score filtering (after fusion mode)
                 if self.config.use_presence_score and self.config.presence_score_mode == "after_fusion":
@@ -288,6 +318,18 @@ class InferenceEngine:
                     current_logits = current_logits * presence_score
 
                 seg_logits[prompt_idx] = current_logits
+                
+                # Debug: Check all prompts for 1.0 values (only for first crop)
+                if not hasattr(self, '_debug_all_prompts_logged'):
+                    self._debug_all_prompts_logged = []
+                if len(self._debug_all_prompts_logged) < self.num_prompts:
+                    num_ones = (current_logits == 1.0).sum().item()
+                    ps = output.get('presence_score', 'N/A')
+                    print(f"\n[DEBUG core.py] Prompt {prompt_idx} ({prompt_word}):")
+                    print(f"  current_logits range: [{current_logits.min():.6f}, {current_logits.max():.6f}]")
+                    print(f"  current_logits pixels == 1.0: {num_ones}")
+                    print(f"  presence_score: {ps}")
+                    self._debug_all_prompts_logged.append(prompt_idx)
 
                 # ===== Clean up current prompt's intermediate variables =====
                 del output

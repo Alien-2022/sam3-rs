@@ -100,6 +100,19 @@ workspace/core/sam3-rs/
 - `apply_semantic_enhancement_with_avg_embedding(...)` - 平均嵌入模式
 - `get_semantic_enhancer(mode)` - 工厂函数
 
+#### 2. experimental/unsupervised_threshold.py - 无监督阈值校准
+基于置信度分布的无监督阈值校准，无需标注数据。
+
+**主要类：**
+- `UnsupervisedThresholdCalibration` - 无监督阈值校准器
+
+**主要方法：**
+- `collect_statistics(segmentor, image_paths, prompt_names, num_classes)` - 收集统计信息
+- `estimate_confidence_threshold(percentile)` - 估计置信度阈值
+- `estimate_global_prob_threshold(percentile)` - 估计全局概率阈值
+- `estimate_prob_threshold_per_class()` - 估计每类概率阈值
+- `calibrate(...)` - 一键完成所有校准
+
 ---
 
 ## 使用方式
@@ -151,7 +164,79 @@ if analyzer:
 config.semantic_enhancement_mode = "select_word"  # 或 "avg_embedding"
 ```
 
-### 4. 启用调试功能
+### 4. 无监督阈值校准
+
+```python
+from segmentor_lib.experimental.unsupervised_threshold import UnsupervisedThresholdCalibration
+
+# 初始化校准器（收集 50 个样本的统计信息）
+calibrator = UnsupervisedThresholdCalibration(num_samples=50)
+
+# 收集统计信息（无需标注数据）
+calibrator.collect_statistics(
+    segmentor=segmentor,
+    image_paths=image_paths,  # 任意测试图像
+    prompt_names=segmentor.prompts['names'],
+    num_classes=segmentor.num_classes
+)
+
+# 估计置信度阈值（使用 30% 百分位）
+confidence_threshold = calibrator.estimate_confidence_threshold(percentile=30)
+# 输出示例：
+#   Confidence Score Statistics:
+#     Min:       0.1234
+#     Mean:      0.6543
+#     Median:    0.6789
+#     30%:       0.4567 ← threshold
+#     Max:       0.9999
+#     Final:     0.4567
+
+# 估计全局概率阈值（使用 50% 百分位，即中位数）
+prob_threshold = calibrator.estimate_global_prob_threshold(percentile=50)
+
+# 或者估计每个类别的概率阈值
+prob_thresholds_per_class = calibrator.estimate_prob_threshold_per_class()
+# 输出示例：
+# Class    Count     Min        P40        Median     P60        Max        Threshold
+# 0        50        0.1234     0.4567     0.5432     0.6234     0.8901     0.5432
+# 1        50        0.2345     0.5234     0.6123     0.7012     0.9234     0.6123
+
+# 一键完成所有校准
+confidence_threshold, prob_thresholds = calibrator.calibrate(
+    segmentor=segmentor,
+    image_paths=image_paths,
+    prompt_names=segmentor.prompts['names'],
+    num_classes=segmentor.num_classes,
+    confidence_percentile=30,
+    prob_percentile=50,
+    use_per_class_prob=False  # 使用全局阈值而非每类阈值
+)
+
+# 更新配置
+config.confidence_threshold = confidence_threshold
+if prob_thresholds is None:
+    # 使用全局 prob_threshold
+    config.prob_threshold = 0.5876  # 从 calibrate() 输出获取
+else:
+    # 使用每类 prob_threshold（需要修改代码支持）
+    pass
+```
+
+**使用命令行工具：**
+
+```bash
+# 运行校准脚本
+python demo_calibration.py \
+    --config eval/configs/loveda.yaml \
+    --num_samples 50 \
+    --confidence_percentile 30 \
+    --prob_percentile 50 \
+    --output assistant/calibration_results.txt
+
+# 结果将保存到文件，包含推荐的阈值
+```
+
+### 5. 启用调试功能
 
 ```python
 config.debug_memory = True

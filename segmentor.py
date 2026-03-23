@@ -12,7 +12,7 @@ import os
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Union
 from dataclasses import dataclass
 
 from segmentor_lib.core import InferenceEngine
@@ -35,6 +35,9 @@ class InferenceConfig:
     confidence_threshold: float = 0.5
     # To return a mask, prob_threshold must be >0 to have effect
     prob_threshold: float = 0.5
+    # Per-class prob thresholds (optional dict: {class_idx: threshold})
+    # If provided, takes precedence over prob_threshold
+    prob_thresholds: Optional[Dict[int, float]] = None
     # Background class index in the output (should match GT mask labels)
     # Default: 0. Set this to match your dataset's background class ID.
     bg_idx: Optional[int] = 0
@@ -281,7 +284,13 @@ class SAM3RSSegmentor:
         # equally with other classes in argmax (no longer forced to 0).
         # This allows the model to predict background as a valid class.
 
-        seg_pred = logits_to_pred(seg_logits, self.config.use_prompted_background, self.config.prob_threshold, bg_idx)
+        seg_pred = logits_to_pred(
+            seg_logits,
+            self.config.use_prompted_background,
+            self.config.prob_threshold,
+            bg_idx,
+            self.config.prob_thresholds  # Add per-class threshold support
+        )
 
         # Fuse individual head logits
         semantic_logits = None
@@ -374,8 +383,19 @@ class SAM3RSSegmentor:
             seg_pred = torch.argmax(logits_for_argmax, dim=1)
 
         # Apply prob_threshold filtering
-        max_vals = seg_logits.max(1)[0]
-        seg_pred[max_vals < self.config.prob_threshold] = bg_idx
+        if self.config.prob_thresholds is not None:
+            # Per-class threshold filtering
+            for cls_idx, threshold in self.config.prob_thresholds.items():
+                # Filter pixels predicted as this class but with low confidence
+                cls_mask = (seg_pred == cls_idx)
+                cls_logits = seg_logits[:, cls_idx, :, :]
+                # Only apply to pixels where this class was predicted
+                low_conf = cls_mask & (cls_logits < threshold)
+                seg_pred[low_conf] = bg_idx
+        else:
+            # Global threshold filtering
+            max_vals = seg_logits.max(1)[0]
+            seg_pred[max_vals < self.config.prob_threshold] = bg_idx
 
         # 3. Package results
         for b in range(batch_size):

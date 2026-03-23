@@ -26,9 +26,20 @@ segmentor:
   # read by the model to build text prompts and map outputs.
   prompts_file: cls_loveda.txt
   # confidence threshhold used to filter 200 queries output by decoder.
-  confidence_threshold: 0.5
+  confidence_threshold: 0.1367
   # used to seperate background from foreground in final mask output.
-  prob_threshold: 0.5
+  prob_threshold: 0.1951
+  # Per-class prob thresholds (example values)
+  # These thresholds override the global prob_threshold for specific classes
+  # Class indices match the order in cls_loveda.txt:
+  # 0: background, 1: building, 2: road, 3: water, 4: barren, 5: forest, 6: agriculture
+  # prob_thresholds:
+  #   1: 0.3828  # building
+  #   2: 0.7673  # road
+  #   3: 0.5565  # water
+  #   4: 0.1364  # barren
+  #   5: 0.0248  # forest
+  #   6: 0.2085  # agriculture
   use_presence_score: true
   bg_idx: 0
   use_prompted_background: true
@@ -60,5 +71,5 @@ segmentor:
   # TVP-Fusion will work in single image mode when slide_crop_size=0
 
 output:
-  save_pred_dir: outputs/preds/loveda
+  # save_pred_dir: outputs/preds/loveda
   metrics_json: outputs/metrics/loveda.json

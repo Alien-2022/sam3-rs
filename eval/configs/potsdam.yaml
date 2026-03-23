@@ -26,9 +26,10 @@ segmentor:
   bpe_path: bpe_simple_vocab_16e6.txt.gz
   prompts_file: cls_potsdam.txt
   # confidence threshhold used to filter 200 queries output by decoder.
-  confidence_threshold: 0.2
+  confidence_threshold: 0.1582
   # used to seperate background from foreground in final mask output.
-  prob_threshold: 0.1
+  prob_threshold: 0.5078
+  use_semantic_head: true
   use_presence_score: true
   bg_idx: 0
   # Set use_prompted_background=true because cls_potsdam.txt includes "background"

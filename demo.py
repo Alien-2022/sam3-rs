@@ -454,7 +454,7 @@ def main():
     bpe_path = os.path.join(script_dir, "sam3", "assets", "bpe_simple_vocab_16e6.txt.gz")
 
     # Test image path
-    test_image_path = os.path.join(SAM_RS_DIR, "test/2522.png")
+    test_image_path = os.path.join(SAM_RS_DIR, "test/0.png")
 
 
     # Prompts file for multi-class segmentation
@@ -525,7 +525,7 @@ def main():
 
     img_name = os.path.splitext(os.path.basename(test_image_path))[0]
 
-    run_single_inference(segmentor, test_image_path, output_dir, img_name, save_heatmap=False, colors=colors, show_presence_scores=False)
+    run_single_inference(segmentor, test_image_path, output_dir, img_name, save_heatmap=True, colors=colors, show_presence_scores=False)
 
     # ============ Summary ============
 
