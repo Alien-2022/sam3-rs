@@ -5,8 +5,42 @@ This script demonstrates how to use UnsupervisedThresholdCalibration
 to automatically determine optimal confidence and prob thresholds
 without requiring labeled data.
 
-Usage:
+==============================================================================
+使用说明 / Usage Guide:
+==============================================================================
+
+【基本用法 / Basic Usage】
     python demo_calibration.py --config eval/configs/loveda.yaml
+
+【常用参数 / Common Arguments】
+    --num_samples N          校准使用的样本数量 (default: 50)
+    --confidence_percentile P 置信度阈值百分位 (default: 30.0)
+    --prob_percentile P      概率阈值百分位 (default: 50.0)
+    --per_class_prob         使用每类独立的概率阈值
+    --batch_size B           推理批次大小 (default: 4)
+    --force_single_view      强制使用单图模式（大图需要sliding window时使用）
+
+【不同数据集的使用场景 / Dataset-Specific Usage】
+
+1. LoveDA (1024x1024, 小图) - 自动使用批量推理:
+    python demo_calibration.py --config eval/configs/loveda.yaml --num_samples 50
+
+2. Potsdam (6000x6000, 大图) - 自动检测大图，使用单图+滑动窗口:
+    python demo_calibration.py --config eval/configs/potsdam.yaml --num_samples 24
+   或手动强制单图模式:
+    python demo_calibration.py --config eval/configs/potsdam.yaml --force_single_view --batch_size 1
+
+【自动模式检测逻辑 / Auto-Detection Logic】
+    - 默认使用批量推理(batch_size=4)，提供1.5-2x加速
+    - 当图片尺寸 > slide_crop_size 时，自动切换到单图模式
+    - 单图模式对大图使用sliding window处理
+    - 可通过 --force_single_view 手动覆盖
+
+【输出结果 / Output】
+    结果保存在 test/calib/calibration_results.txt
+    包含推荐的 confidence_threshold 和 prob_threshold(s)
+
+==============================================================================
 """
 
 import os
@@ -58,6 +92,17 @@ def parse_args():
         type=str,
         default='test/calib/calibration_results.txt',
         help='Output file for calibration results'
+    )
+    parser.add_argument(
+        '--batch_size',
+        type=int,
+        default=4,
+        help='Batch size for inference (default: 4). Set to 1 for large images requiring sliding window.'
+    )
+    parser.add_argument(
+        '--force_single_view',
+        action='store_true',
+        help='Force single-view mode (uses sliding window for large images). Auto-detected if not specified.'
     )
 
     return parser.parse_args()
@@ -182,7 +227,9 @@ def main():
         num_classes=num_classes,
         confidence_percentile=args.confidence_percentile,
         prob_percentile=args.prob_percentile,
-        use_per_class_prob=args.per_class_prob
+        use_per_class_prob=args.per_class_prob,
+        batch_size=args.batch_size,
+        force_single_view=args.force_single_view
     )
 
     # Get global prob_threshold if not using per-class

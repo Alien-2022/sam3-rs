@@ -122,28 +122,6 @@ class SlidingWindowInference:
                         semantic_logits_sum[:, y1:y2, x1:x2] += crop_semantic
                     if crop_instance is not None:
                         instance_logits_sum[:, y1:y2, x1:x2] += crop_instance
-                    
-                    # Debug: Track max values during accumulation (every 5 crops)
-                    if crop_idx % 5 == 0:
-                        print(f"\n[DEBUG sliding_window.py] After crop {crop_idx}:")
-                        print(f"  crop_seg_logits max: {crop_seg_logits.max():.6f}")
-                        # Check per-channel max
-                        for ch in range(crop_seg_logits.shape[0]):
-                            ch_max = crop_seg_logits[ch].max().item()
-                            if ch_max > 0.5:  # Only print channels with significant values
-                                print(f"    Channel {ch} max: {ch_max:.6f}")
-                        print(f"  seg_logits_sum max: {seg_logits_sum.max():.6f}")
-                        print(f"  count_map max: {count_map.max():.6f}")
-                        # Check if any position has sum > 1.0
-                        over_one = (seg_logits_sum > 1.0).sum().item()
-                        if over_one > 0:
-                            print(f"  WARNING: {over_one} positions have sum > 1.0!")
-                            # Find one example
-                            over_one_mask = seg_logits_sum > 1.0
-                            if over_one_mask.any():
-                                idx = torch.where(over_one_mask)
-                                c, y, x = idx[0][0].item(), idx[1][0].item(), idx[2][0].item()
-                                print(f"    Example at ({c}, {y}, {x}): sum={seg_logits_sum[c, y, x]:.6f}, count={count_map[y, x]:.6f}")
 
                     # Collect boxes from this crop and transform to global coordinates
                     if crop_per_class and boxes_accumulator is not None:
@@ -187,39 +165,6 @@ class SlidingWindowInference:
         seg_logits = seg_logits_sum / count_map.unsqueeze(0).to(torch.bfloat16)
         semantic_logits = semantic_logits_sum / count_map.unsqueeze(0).to(torch.bfloat16) if semantic_logits_sum is not None else None
         instance_logits = instance_logits_sum / count_map.unsqueeze(0).to(torch.bfloat16) if instance_logits_sum is not None else None
-        
-        # Debug: Check final seg_logits
-        print(f"\n[DEBUG sliding_window.py] Final seg_logits:")
-        print(f"  Overall range: [{seg_logits.min():.6f}, {seg_logits.max():.6f}]")
-        num_ones = (seg_logits == 1.0).sum().item()
-        total = seg_logits.numel()
-        print(f"  Pixels == 1.0: {num_ones} / {total} ({100*num_ones/total:.4f}%)")
-        print(f"  seg_logits_sum max: {seg_logits_sum.max():.6f}")
-        print(f"  count_map max: {count_map.max():.6f}")
-        print(f"  count_map min: {count_map.min():.6f}")
-        
-        # Per-channel analysis
-        print(f"\n  Per-channel max:")
-        for ch in range(seg_logits.shape[0]):
-            ch_max = seg_logits[ch].max().item()
-            ch_ones = (seg_logits[ch] == 1.0).sum().item()
-            print(f"    Channel {ch}: max={ch_max:.6f}, ones={ch_ones}")
-        
-        # Detailed analysis of 1.0 values
-        if num_ones > 0:
-            ones_mask = (seg_logits == 1.0)
-            # Find positions where seg_logits == 1.0
-            idx = torch.where(ones_mask)
-            c, y, x = idx[0][0].item(), idx[1][0].item(), idx[2][0].item()
-            print(f"\n  Detailed analysis of first 1.0 pixel at ({c}, {y}, {x}):")
-            print(f"    seg_logits_sum = {seg_logits_sum[c, y, x]:.6f}")
-            print(f"    count_map = {count_map[y, x]:.6f}")
-            print(f"    Average = {seg_logits[c, y, x]:.6f}")
-            # Check neighboring pixels
-            y_start, y_end = max(0, y-1), min(h, y+2)
-            x_start, x_end = max(0, x-1), min(w, x+2)
-            print(f"    Neighborhood count_map:\n{count_map[y_start:y_end, x_start:x_end]}")
-            print(f"    Neighborhood seg_logits_sum:\n{seg_logits_sum[c, y_start:y_end, x_start:x_end]}")
 
         # Merge boxes and scores from all crops and apply NMS to remove duplicates
         per_class_results = {}

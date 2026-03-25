@@ -101,8 +101,6 @@ class InferenceEngine:
         w, h = image.size
         seg_logits = torch.zeros((self.num_prompts, h, w), device=self.device)
         per_class_results = {}
-        self._debug_logged = False  # Debug flag for before fusion
-        self._debug_after_logged = False  # Debug flag for after fusion
 
         # Initialize separate logits for individual heads
         if self.config.use_semantic_head:
@@ -261,13 +259,6 @@ class InferenceEngine:
 
                             inst_current = torch.max(inst_current, inst_logits * inst_score)
 
-                    # Debug: Check instance head output
-                    if prompt_idx == 0 and not self._debug_logged:
-                        print(f"\n[DEBUG core.py] Instance head:")
-                        print(f"  inst_current range: [{inst_current.min():.6f}, {inst_current.max():.6f}]")
-                        num_ones = (inst_current == 1.0).sum().item()
-                        print(f"  inst_current pixels == 1.0: {num_ones}")
-                    
                     current_logits = torch.max(current_logits, inst_current)
                     instance_logits_only[prompt_idx] = inst_current
 
@@ -285,32 +276,11 @@ class InferenceEngine:
                     # Apply presence score to semantic head if enabled
                     if self.config.use_presence_score and self.config.presence_score_mode == "before_fusion":
                         presence_score = output.get("presence_score", 0)
-                        # Debug: 打印 presence_score 和 semantic_logits 的值
-                        if prompt_idx == 0 and hasattr(self, '_debug_logged'):
-                            if not self._debug_logged:
-                                print(f"\n[DEBUG core.py] Before fusion:")
-                                print(f"  presence_score: {presence_score} (type: {type(presence_score)})")
-                                print(f"  semantic_logits range: [{semantic_logits.min():.6f}, {semantic_logits.max():.6f}]")
-                                print(f"  semantic_logits mean: {semantic_logits.mean():.6f}")
-                                # 检查 semantic_logits 中等于 1.0 的像素
-                                num_ones = (semantic_logits == 1.0).sum().item()
-                                total = semantic_logits.numel()
-                                print(f"  semantic_logits pixels == 1.0: {num_ones} / {total} ({100*num_ones/total:.4f}%)")
-                                self._debug_logged = True
                         semantic_logits = semantic_logits * presence_score
 
                     # Fusion: take max of instance and semantic predictions
                     current_logits = torch.max(current_logits, semantic_logits)
                     semantic_logits_only[prompt_idx] = semantic_logits
-                    
-                    # Debug: Check after fusion
-                    if prompt_idx == 0 and hasattr(self, '_debug_after_logged'):
-                        if not self._debug_after_logged:
-                            print(f"\n[DEBUG core.py] After fusion:")
-                            print(f"  current_logits range: [{current_logits.min():.6f}, {current_logits.max():.6f}]")
-                            num_ones = (current_logits == 1.0).sum().item()
-                            print(f"  current_logits pixels == 1.0: {num_ones}")
-                            self._debug_after_logged = True
 
                 # 3. Presence score filtering (after fusion mode)
                 if self.config.use_presence_score and self.config.presence_score_mode == "after_fusion":
@@ -318,18 +288,6 @@ class InferenceEngine:
                     current_logits = current_logits * presence_score
 
                 seg_logits[prompt_idx] = current_logits
-                
-                # Debug: Check all prompts for 1.0 values (only for first crop)
-                if not hasattr(self, '_debug_all_prompts_logged'):
-                    self._debug_all_prompts_logged = []
-                if len(self._debug_all_prompts_logged) < self.num_prompts:
-                    num_ones = (current_logits == 1.0).sum().item()
-                    ps = output.get('presence_score', 'N/A')
-                    print(f"\n[DEBUG core.py] Prompt {prompt_idx} ({prompt_word}):")
-                    print(f"  current_logits range: [{current_logits.min():.6f}, {current_logits.max():.6f}]")
-                    print(f"  current_logits pixels == 1.0: {num_ones}")
-                    print(f"  presence_score: {ps}")
-                    self._debug_all_prompts_logged.append(prompt_idx)
 
                 # ===== Clean up current prompt's intermediate variables =====
                 del output
@@ -400,6 +358,9 @@ class InferenceEngine:
             batch_seg_logits = torch.zeros(
                 (batch_size, self.num_prompts, h_orig, w_orig), device=self.device
             )
+
+            # Initialize per-class results for detailed mode
+            batch_per_class_results = [{} for _ in range(batch_size)] if detailed else None
 
             # Construct FindStage for batch mode
             find_stage = FindStage(
@@ -542,6 +503,32 @@ class InferenceEngine:
                 # Store in batch_seg_logits
                 batch_seg_logits[:, prompt_idx] = current_batch_logits
 
+                # Collect per-class detailed results if requested (boxes and scores)
+                if detailed and batch_per_class_results is not None:
+                    # inst_mask_logits: [B, 200, H, W], scores: [B, 200], mask_keep: [B, 200]
+                    for b in range(batch_size):
+                        # Get valid instances for this image
+                        img_mask_keep = mask_keep[b]  # [200]
+                        valid_count = img_mask_keep.sum().item()
+
+                        if valid_count > 0:
+                            # Get valid masks and scores
+                            valid_indices = torch.where(img_mask_keep)[0]
+                            valid_masks = inst_mask_logits[b, valid_indices]  # [N, H, W]
+                            valid_scores = scores[b, valid_indices]  # [N]
+
+                            # Convert masks to boxes
+                            valid_boxes = self._masks_to_boxes(valid_masks)  # [N, 4]
+
+                            # Store in per-class results
+                            if prompt_word not in batch_per_class_results[b]:
+                                batch_per_class_results[b][prompt_word] = {
+                                    "boxes": [],
+                                    "scores": []
+                                }
+                            batch_per_class_results[b][prompt_word]["boxes"].append(valid_boxes)
+                            batch_per_class_results[b][prompt_word]["scores"].append(valid_scores)
+
                 # ===== Clean up current prompt's intermediate variables =====
                 del outputs, out_logits, out_masks, out_probs, presence_score
                 del mask_keep, mask_keep_expanded, scores
@@ -566,8 +553,64 @@ class InferenceEngine:
                     del backbone_out[key]
         torch.cuda.empty_cache()
 
-        return batch_seg_logits, [{} for _ in range(batch_size)], None, None, None
+        # Concatenate boxes and scores from all prompts for each image
+        if detailed and batch_per_class_results is not None:
+            for b in range(batch_size):
+                for prompt_word in batch_per_class_results[b]:
+                    if batch_per_class_results[b][prompt_word]["boxes"]:
+                        batch_per_class_results[b][prompt_word]["boxes"] = torch.cat(
+                            batch_per_class_results[b][prompt_word]["boxes"], dim=0
+                        )
+                        batch_per_class_results[b][prompt_word]["scores"] = torch.cat(
+                            batch_per_class_results[b][prompt_word]["scores"], dim=0
+                        )
+
+        return batch_seg_logits, batch_per_class_results if detailed else [{} for _ in range(batch_size)], None, None, None
 
     def set_text_features_cache(self, cache: Optional[Dict]):
         """Set the pre-computed text features cache."""
         self.text_features_cache = cache
+
+    def _masks_to_boxes(self, masks: torch.Tensor) -> torch.Tensor:
+        """Convert binary masks to bounding boxes.
+
+        Args:
+            masks: [N, H, W] tensor of binary masks (values > 0 are considered foreground)
+
+        Returns:
+            boxes: [N, 4] tensor of boxes in [x1, y1, x2, y2] format
+        """
+        N, H, W = masks.shape
+        if N == 0:
+            return torch.zeros((0, 4), device=masks.device, dtype=masks.dtype)
+
+        # Create coordinate grids
+        y_coords = torch.arange(H, device=masks.device, dtype=masks.dtype).view(1, H, 1)
+        x_coords = torch.arange(W, device=masks.device, dtype=masks.dtype).view(1, 1, W)
+
+        # Expand to [N, H, W]
+        y_coords = y_coords.expand(N, H, W)
+        x_coords = x_coords.expand(N, H, W)
+
+        # Mask out background pixels (set to large/small values that won't affect min/max)
+        masked_y = torch.where(masks > 0, y_coords, torch.full_like(y_coords, H))
+        masked_x = torch.where(masks > 0, x_coords, torch.full_like(x_coords, W))
+        masked_y_neg = torch.where(masks > 0, y_coords, torch.full_like(y_coords, -1))
+        masked_x_neg = torch.where(masks > 0, x_coords, torch.full_like(x_coords, -1))
+
+        # Find bounding box coordinates
+        y1 = masked_y_neg.view(N, -1).max(dim=1)[0]
+        x1 = masked_x_neg.view(N, -1).max(dim=1)[0]
+        y2 = masked_y.view(N, -1).min(dim=1)[0]
+        x2 = masked_x.view(N, -1).min(dim=1)[0]
+
+        # Clamp to valid range
+        y1 = torch.clamp(y1, 0, H - 1)
+        x1 = torch.clamp(x1, 0, W - 1)
+        y2 = torch.clamp(y2, 0, H - 1)
+        x2 = torch.clamp(x2, 0, W - 1)
+
+        # Stack to [N, 4]
+        boxes = torch.stack([x1, y1, x2, y2], dim=1)
+
+        return boxes

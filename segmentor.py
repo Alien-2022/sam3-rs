@@ -217,6 +217,12 @@ class SAM3RSSegmentor:
         """
         return self.engine.inference_batch_view(images, detailed, image_names)
 
+    def inference_batch_view(self, images: List[Image.Image], detailed: bool = False, image_names: Optional[List[str]] = None):
+        """
+        公共接口：高性能批量推理实现 (True Batch Inference)。
+        """
+        return self._inference_batch_view(images, detailed, image_names)
+
 
     def _sliding_window_inference(self, image: Image.Image, detailed: bool = False,
                                 image_name: str = "unknown"):

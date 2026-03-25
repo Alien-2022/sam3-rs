@@ -1,5 +1,9 @@
 base_config: ./base.yaml
 
+dataloader:
+  batch_size: 4
+  num_workers: 4
+
 dataset:
   name: loveda
   data_root: data/LoveDA
@@ -26,9 +30,9 @@ segmentor:
   # read by the model to build text prompts and map outputs.
   prompts_file: cls_loveda.txt
   # confidence threshhold used to filter 200 queries output by decoder.
-  confidence_threshold: 0.1367
+  confidence_threshold: 0.2317
   # used to seperate background from foreground in final mask output.
-  prob_threshold: 0.1951
+  prob_threshold: 0.1822
   # Per-class prob thresholds (example values)
   # These thresholds override the global prob_threshold for specific classes
   # Class indices match the order in cls_loveda.txt:
