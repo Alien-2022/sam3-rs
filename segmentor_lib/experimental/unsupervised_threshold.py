@@ -225,8 +225,8 @@ class UnsupervisedThresholdCalibration:
 
         # 确定要排除的背景类
         if background_names is None:
-            # background_names = ["background", "clutter"]
-            background_names = []
+            background_names = ["background", "clutter"]
+            # background_names = []
 
         print(f"\n[UnsupervisedCalibration] Collecting statistics from {num_samples} images...")
         print(f"  Batch size: {batch_size}")

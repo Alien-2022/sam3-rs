@@ -1,6 +1,6 @@
-clutter,water body,tennis court,swimming pool,sports field
-impervious surfaces,road,parking lot,pavement,concrete ground
-building,rectangular roof,blue roof,flat roof,gray roof
-low vegetation,grassland,cropland,red vegetation,low grass
-tree,tree canopy,circular crown,red treetop,clustered crown
-car,vehicle,parked car,small rectangle,moving object
+clutter
+impervious surfaces
+building
+low vegetation
+tree
+car

@@ -30,9 +30,9 @@ segmentor:
   # read by the model to build text prompts and map outputs.
   prompts_file: cls_loveda.txt
   # confidence threshhold used to filter 200 queries output by decoder.
-  confidence_threshold: 0.2317
+  confidence_threshold: 0.0251
   # used to seperate background from foreground in final mask output.
-  prob_threshold: 0.1822
+  prob_threshold: 0.2342
   # Per-class prob thresholds (example values)
   # These thresholds override the global prob_threshold for specific classes
   # Class indices match the order in cls_loveda.txt:
@@ -68,7 +68,7 @@ segmentor:
   # Enable detailed memory debugging
   debug_memory: false
   # Log file path for memory analysis (relative to project root)
-  debug_log_file: "assistant/memory_debug_eval.log"
+  debug_log_file: "outputs/memory_debug_eval.log"
   
   # sliding window parameters
   # LoveDA images are 1024x1024, set to 0 for single image mode (no sliding window)

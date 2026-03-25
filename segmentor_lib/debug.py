@@ -18,11 +18,23 @@ class MemoryDebugger:
             log_file: Path to log file for debug output
         """
         self.enabled = enabled
-        self.log_handle = open(log_file, 'w', encoding='utf-8') if log_file else None
+        self.log_handle = None  # 先初始化，避免 __del__ 访问失败
+
+        if log_file:
+            import os
+            # 自动创建日志目录
+            log_dir = os.path.dirname(log_file)
+            if log_dir and not os.path.exists(log_dir):
+                os.makedirs(log_dir, exist_ok=True)
+            try:
+                self.log_handle = open(log_file, 'w', encoding='utf-8')
+            except Exception as e:
+                print(f"[Warning] Failed to open log file {log_file}: {e}")
+                self.log_handle = None
 
     def __del__(self):
         """Close log file on cleanup."""
-        if self.log_handle:
+        if hasattr(self, 'log_handle') and self.log_handle:
             self.log_handle.close()
 
     def debug_print(self, message: str):
