@@ -5,7 +5,7 @@ dataset:
   data_root: data/Potsdam
   # img_dir: Exp/img
   # mask_dir: Exp/mask
-  img_dir: pre_slice/img_png
+  img_dir: pre_slice/img
   mask_dir: pre_slice/mask
   cls_file: cls_potsdam.txt
   ignore_index: 255
@@ -26,17 +26,25 @@ segmentor:
   bpe_path: bpe_simple_vocab_16e6.txt.gz
   prompts_file: cls_potsdam.txt
   # confidence threshhold used to filter 200 queries output by decoder.
-  confidence_threshold:  0.1012
-  # used to seperate background from foreground in final mask output.
-  prob_threshold: 0.1087
-  # prob_thresholds:
-  #   1: 0.0420  # building
-  #   2: 0.0356 # road
-  #   3: 0.0747  # water
-  #   5: 0.0256  # forest
-  #   6: 0.0253  # agriculture
-  use_semantic_head: true
-  use_presence_score: true
+  confidence_threshold: 0.1582
+
+  # Pre-fusion thresholds for each head (calibrated per-class)
+  # Applied BEFORE dual-head fusion to preserve true distribution
+  instance_prob_thresholds:
+    1: 0.0500 
+    2: 0.0840 
+    3: 0.0791 
+    4: 0.0500    
+    5: 0.0500
+  # semantic_prob_thresholds:
+  #   1: 0.0442  
+  #   2: 0.1035
+  #   3: 0.2246  
+  #   4: 0.0850
+  #   5: 0.5195   
+  use_instance_head: true  
+  use_semantic_head: false
+  use_presence_score: false
   bg_idx: 0
   # Set use_prompted_background=true because cls_potsdam.txt includes "background"
   # as the first line (no need to inject a zero-logit background channel)

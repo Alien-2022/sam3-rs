@@ -3,8 +3,8 @@ base_config: ./base.yaml
 dataset:
   name: vaihingen
   data_root: data/Vaihingen
-  img_dir: pre_slice/img
-  mask_dir: pre_slice/mask
+  img_dir: Exp/img
+  mask_dir: Exp/mask
   cls_file: cls_vaihingen.txt
   ignore_index: 255
   # Vaihingen dataset uses labels 0-5 for 6 classes:
@@ -31,20 +31,37 @@ segmentor:
   bpe_path: bpe_simple_vocab_16e6.txt.gz
   prompts_file: cls_vaihingen.txt
   # confidence threshhold used to filter 200 queries output by decoder.
-  confidence_threshold: 0.4
-  # used to seperate background from foreground in final mask output.
-  prob_threshold: 0.1
+  confidence_threshold:  0.1582
+
+  # Pre-fusion thresholds for each head (calibrated per-class)
+  # Applied BEFORE dual-head fusion to preserve true distribution
+  # prob_threshold: 0.1
+  instance_prob_thresholds:
+    1: 0.0500 
+    2: 0.1592 
+    3: 0.0500
+    4: 0.0515    
+    5: 0.0500
+  semantic_prob_thresholds:
+    1: 0.0518 
+    2: 0.1660   
+    3: 0.1152 
+    4: 0.2539 
+    5: 0.6680 
+  use_instance_head: true
   use_presence_score: true
+  use_semantic_head: true
   bg_idx: 0
   # Set use_prompted_background=true because cls_vaihingen.txt includes "background"
   # as the first line (no need to inject a zero-logit background channel)
   use_prompted_background: true
   weight_key: null
 
+  
   # ========================================
   # Experimental Features (may be removed)
   # ========================================
-  semantic_enhancement_mode: "avg_embedding"  # Options: "false", "select_word", "avg_embedding"
+  semantic_enhancement_mode: "false"  # Options: "false", "select_word", "avg_embedding"
   analyze_presence_score: false
   presence_score_mode: "before_fusion"
 

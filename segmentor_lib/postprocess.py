@@ -52,30 +52,15 @@ def logits_to_pred(
     logits: torch.Tensor,
     use_prompted_background: bool,
     prob_threshold: float,
-    bg_idx: int,
-    prob_thresholds: Optional[Dict[int, float]] = None
+    bg_idx: int
 ) -> torch.Tensor:
     """
     Convert logits to class predictions with background handling.
-    Supports both global and per-class prob thresholds.
 
     Args:
         logits: [num_classes, H, W] or [B, num_classes, H, W]
         use_prompted_background: Whether background is in prompts
-        prob_threshold: Global threshold for low-confidence suppression (used if prob_thresholds is None)
-        bg_idx: Background class index
-        prob_thresholds: Optional dict mapping class_idx to threshold for per-class filtering
-
-    Returns:
-        [H, W] or [B, H, W] class predictions
-    """
-    """
-    Convert logits to class predictions with background handling.
-
-    Args:
-        logits: [num_classes, H, W] or [B, num_classes, H, W]
-        use_prompted_background: Whether background is in prompts
-        prob_threshold: Threshold for low-confidence suppression
+        prob_threshold: Global threshold for low-confidence suppression
         bg_idx: Background class index
 
     Returns:
@@ -92,44 +77,16 @@ def logits_to_pred(
             logits_for_argmax = torch.cat([bg_pad, logit_single], dim=0)
             pred = torch.argmax(logits_for_argmax, dim=0)
 
-            # Apply prob threshold filtering
-            if prob_thresholds is not None:
-                # Per-class threshold: apply different thresholds for each class
-                # Note: Background class (bg_idx) doesn't need threshold check - it's the default fallback
-                num_classes = logit_single.shape[0]
-                for cls_idx in range(num_classes):
-                    # Skip background class - no threshold needed
-                    if cls_idx == bg_idx:
-                        continue
-                    # Get threshold for this class (default to global threshold if not specified)
-                    threshold = prob_thresholds.get(cls_idx, prob_threshold)
-                    # Apply threshold: pixels with low confidence for this class go to background
-                    cls_logits = logit_single[cls_idx]
-                    pred[(pred == cls_idx) & (cls_logits < threshold)] = bg_idx
-            else:
-                # Global threshold: assign pixels with max logit < threshold to background
-                max_vals = logit_single.max(0)[0]
-                pred[max_vals < prob_threshold] = bg_idx
+            # Global threshold: assign pixels with max logit < threshold to background
+            max_vals = logit_single.max(0)[0]
+            pred[max_vals < prob_threshold] = bg_idx
         else:
             # Case 2: Background IS in prompts - no need to inject background channel
             pred = torch.argmax(logit_single, dim=0)
 
-            # Apply prob threshold filtering
-            if prob_thresholds is not None:
-                # Per-class threshold
-                # Note: Background class (bg_idx) doesn't need threshold check - it's the default fallback
-                num_classes = logit_single.shape[0]
-                for cls_idx in range(num_classes):
-                    # Skip background class - no threshold needed
-                    if cls_idx == bg_idx:
-                        continue
-                    threshold = prob_thresholds.get(cls_idx, prob_threshold)
-                    cls_logits = logit_single[cls_idx]
-                    pred[(pred == cls_idx) & (cls_logits < threshold)] = bg_idx
-            else:
-                # Global threshold
-                max_vals = logit_single.max(0)[0]
-                pred[max_vals < prob_threshold] = bg_idx
+            # Global threshold: assign pixels with max logit < threshold to background
+            max_vals = logit_single.max(0)[0]
+            pred[max_vals < prob_threshold] = bg_idx
 
         return pred
 

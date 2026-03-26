@@ -257,6 +257,11 @@ class InferenceEngine:
                                 align_corners=False,
                             ).squeeze()
 
+                            # Apply instance head threshold BEFORE fusion (if configured)
+                            if self.config.instance_prob_thresholds and class_id in self.config.instance_prob_thresholds:
+                                inst_thresh = self.config.instance_prob_thresholds[class_id]
+                                inst_logits = inst_logits * (inst_logits >= inst_thresh).float()
+
                             inst_current = torch.max(inst_current, inst_logits * inst_score)
 
                     current_logits = torch.max(current_logits, inst_current)
@@ -272,6 +277,11 @@ class InferenceEngine:
                         mode="bilinear",
                         align_corners=False,
                     ).squeeze()  # [H, W]
+
+                    # Apply semantic head threshold BEFORE fusion (if configured)
+                    if self.config.semantic_prob_thresholds and class_id in self.config.semantic_prob_thresholds:
+                        sem_thresh = self.config.semantic_prob_thresholds[class_id]
+                        semantic_logits = semantic_logits * (semantic_logits >= sem_thresh).float()
 
                     # Apply presence score to semantic head if enabled
                     if self.config.use_presence_score and self.config.presence_score_mode == "before_fusion":

@@ -33,11 +33,9 @@ class InferenceConfig:
     # Inference parameters
     device: str = "cuda"
     confidence_threshold: float = 0.5
-    # To return a mask, prob_threshold must be >0 to have effect
-    prob_threshold: float = 0.5
-    # Per-class prob thresholds (optional dict: {class_idx: threshold})
-    # If provided, takes precedence over prob_threshold
-    prob_thresholds: Optional[Dict[int, float]] = None
+    # Global prob threshold as final fallback (internal use, not exposed in YAML)
+    # Pixels with max logit below this value are assigned to background
+    prob_threshold: float = 0.01
     # Background class index in the output (should match GT mask labels)
     # Default: 0. Set this to match your dataset's background class ID.
     bg_idx: Optional[int] = 0
@@ -80,6 +78,12 @@ class InferenceConfig:
     debug_log_file: Optional[str] = None  # Path to log file for debug output
     analyze_presence_score: bool = False  # Analyze and print presence score statistics
 
+    # Dual-head separate thresholds (experimental)
+    # Apply thresholds to each head BEFORE fusion, rather than after fusion
+    # This preserves the true distribution of each head's logits
+    semantic_prob_thresholds: Optional[Dict[int, float]] = None
+    instance_prob_thresholds: Optional[Dict[int, float]] = None
+
 @dataclass
 class SegmentationResult:
     """Result structure for each image"""
@@ -116,7 +120,7 @@ class SAM3RSSegmentor:
         self.device = torch.device(config.device)
 
         # Check config validity
-        if not (0.0 < config.prob_threshold < 1.0):
+        if not (config.prob_threshold < 1.0):
             raise ValueError("prob_threshold must be between 0 and 1.")
 
         # Initialize memory debugger
@@ -294,8 +298,7 @@ class SAM3RSSegmentor:
             seg_logits,
             self.config.use_prompted_background,
             self.config.prob_threshold,
-            bg_idx,
-            self.config.prob_thresholds  # Add per-class threshold support
+            bg_idx
         )
 
         # Fuse individual head logits
@@ -388,20 +391,9 @@ class SAM3RSSegmentor:
             logits_for_argmax = torch.cat([bg_pad, seg_logits], dim=1)
             seg_pred = torch.argmax(logits_for_argmax, dim=1)
 
-        # Apply prob_threshold filtering
-        if self.config.prob_thresholds is not None:
-            # Per-class threshold filtering
-            for cls_idx, threshold in self.config.prob_thresholds.items():
-                # Filter pixels predicted as this class but with low confidence
-                cls_mask = (seg_pred == cls_idx)
-                cls_logits = seg_logits[:, cls_idx, :, :]
-                # Only apply to pixels where this class was predicted
-                low_conf = cls_mask & (cls_logits < threshold)
-                seg_pred[low_conf] = bg_idx
-        else:
-            # Global threshold filtering
-            max_vals = seg_logits.max(1)[0]
-            seg_pred[max_vals < self.config.prob_threshold] = bg_idx
+        # Apply global prob_threshold filtering (internal fallback)
+        max_vals = seg_logits.max(1)[0]
+        seg_pred[max_vals < self.config.prob_threshold] = bg_idx
 
         # 3. Package results
         for b in range(batch_size):

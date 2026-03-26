@@ -104,6 +104,13 @@ def parse_args():
         action='store_true',
         help='Force single-view mode (uses sliding window for large images). Auto-detected if not specified.'
     )
+    parser.add_argument(
+        '--head_type',
+        type=str,
+        default='auto',
+        choices=['auto', 'instance', 'semantic'],
+        help='Head type for calibration strategy: instance (Non-Zero adaptive), semantic (Top 5%%), auto (detect from config)'
+    )
 
     return parser.parse_args()
 
@@ -144,21 +151,14 @@ def main():
                 break
 
     # Create InferenceConfig
-    # Handle prob_thresholds: convert dict keys to int if needed
-    prob_thresholds = config_dict['segmentor'].get('prob_thresholds')
-    if prob_thresholds is not None:
-        prob_thresholds = {int(k): v for k, v in prob_thresholds.items()}
-
-    # Get prob_threshold (use default 0.5 if not specified)
-    prob_threshold = config_dict['segmentor'].get('prob_threshold', 0.5)
-
     inference_config = InferenceConfig(
         checkpoint_path=checkpoint_path,
         bpe_path=bpe_path,
         device=config_dict['segmentor'].get('device', 'cuda'),
         confidence_threshold=config_dict['segmentor']['confidence_threshold'],
-        prob_threshold=prob_threshold,
-        prob_thresholds=prob_thresholds,
+        # 重要：校准过程中不使用 pre-fusion thresholds，确保基于原始 logits 统计
+        instance_prob_thresholds=None,
+        semantic_prob_thresholds=None,
         use_semantic_head=config_dict['segmentor'].get('use_semantic_head', True),
         use_instance_head=config_dict['segmentor'].get('use_instance_head', True),
         use_presence_score=config_dict['segmentor'].get('use_presence_score', True),
@@ -216,8 +216,20 @@ def main():
         prompt_names = segmentor.prompts['names']
         num_classes = segmentor.num_classes
 
-    # Initialize calibrator
-    calibrator = UnsupervisedThresholdCalibration(num_samples=args.num_samples)
+    # Auto-detect head_type if set to 'auto'
+    head_type = args.head_type
+    if head_type == 'auto':
+        # 根据配置自动检测：如果只开 instance head，用 instance 策略；否则用 semantic
+        use_instance = config_dict['segmentor'].get('use_instance_head', True)
+        use_semantic = config_dict['segmentor'].get('use_semantic_head', True)
+        if use_instance and not use_semantic:
+            head_type = 'instance'
+        else:
+            head_type = 'semantic'  # 默认或 semantic only 都用 semantic 策略
+        print(f"[Auto-detect] Head type: {head_type} (instance={use_instance}, semantic={use_semantic})")
+
+    # Initialize calibrator with head_type
+    calibrator = UnsupervisedThresholdCalibration(num_samples=args.num_samples, head_type=head_type)
 
     # Run calibration
     confidence_threshold, prob_thresholds = calibrator.calibrate(
@@ -232,14 +244,11 @@ def main():
         force_single_view=args.force_single_view
     )
 
-    # Get global prob_threshold if not using per-class
-    if prob_thresholds is None:
-        # Re-estimate global prob threshold
-        global_prob_threshold = calibrator.estimate_global_prob_threshold(
-            percentile=args.prob_percentile
-        )
+    # Determine threshold type based on head_type
+    if args.head_type == "instance":
+        threshold_key = "instance_prob_thresholds"
     else:
-        global_prob_threshold = None
+        threshold_key = "semantic_prob_thresholds"
 
     # Save results
     output_path = Path(args.output)
@@ -251,6 +260,7 @@ def main():
         f.write("=" * 70 + "\n\n")
 
         f.write(f"Config file: {args.config}\n")
+        f.write(f"Head type: {args.head_type}\n")
         f.write(f"Number of samples: {args.num_samples}\n")
         f.write(f"Confidence percentile: {args.confidence_percentile}%\n")
         f.write(f"Prob percentile: {args.prob_percentile}%\n")
@@ -261,36 +271,27 @@ def main():
         f.write(f"confidence_threshold: {confidence_threshold:.4f}\n")
 
         if args.per_class_prob and prob_thresholds:
-            f.write(f"\nprob_thresholds (per-class):\n")
+            f.write(f"\n{threshold_key} (pre-fusion per-class):\n")
             for class_idx, threshold in prob_thresholds.items():
                 prompt_name = prompt_names[class_idx] if class_idx < len(prompt_names) else f"class_{class_idx}"
                 f.write(f"  {class_idx} ({prompt_name}): {threshold:.4f}\n")
         else:
-            f.write(f"prob_threshold (global): {global_prob_threshold:.4f}\n")
+            f.write(f"\nNote: Global threshold is deprecated. Use per-class thresholds.\n")
 
         f.write("\n" + "=" * 70 + "\n")
         f.write("To use these thresholds:\n")
         f.write("-" * 70 + "\n")
         if args.per_class_prob and prob_thresholds:
-            f.write("Option 1: Use per-class prob thresholds (recommended):\n")
-            f.write("Add the following to your YAML config file:\n\n")
+            f.write(f"Add the following to your YAML config file:\n\n")
             f.write("segmentor:\n")
             f.write(f"  confidence_threshold: {confidence_threshold:.4f}\n")
-            f.write(f"  prob_threshold: 0.5  # fallback for unspecified classes\n")
-            f.write(f"  prob_thresholds:\n")
+            f.write(f"  {threshold_key}:\n")
             for class_idx, threshold in prob_thresholds.items():
                 prompt_name = prompt_names[class_idx] if class_idx < len(prompt_names) else f"class_{class_idx}"
-                f.write(f"    {class_idx}: {threshold:.4f},  # {prompt_name}\n")
-            f.write("\n")
-            f.write(f"Option 2: Use median as global prob_threshold:\n")
-            global_median = np.median(list(prob_thresholds.values()))
-            f.write("segmentor:\n")
-            f.write(f"  confidence_threshold: {confidence_threshold:.4f}\n")
-            f.write(f"  prob_threshold: {global_median:.4f}  # median of per-class thresholds\n")
+                f.write(f"    {class_idx}: {threshold:.4f}  # {prompt_name}\n")
         else:
-            f.write("segmentor:\n")
-            f.write(f"  confidence_threshold: {confidence_threshold:.4f}\n")
-            f.write(f"  prob_threshold: {global_prob_threshold:.4f}\n")
+            f.write("Warning: Global threshold mode is deprecated.\n")
+            f.write("Please use --per_class_prob for per-class thresholds.\n")
         f.write("=" * 70 + "\n")
 
     print(f"\n[Output] Calibration results saved to: {output_path}")
