@@ -1,0 +1,6 @@
+clutter,water body,tennis court,bare soil,swimming pool
+impervious surfaces,gray road,concrete surface,asphalt,parking lot
+building,rectangular roof,gray roof,flat roof,commercial building
+low vegetation,grass,lawn,herbaceous cover,ground cover
+tree,tree canopy,green canopy,forest,circular crown
+car,vehicle,automobile,parked car,small rectangular vehicle
