@@ -1,0 +1,6 @@
+clutter,water body,tennis court,sports field,miscellaneous object
+impervious surfaces,paved road,gray pavement,parking lot,concrete surface
+building,residential roof,commercial roof,flat roof,rectangular structure
+low vegetation,grass lawn,ground cover,low grass,herbaceous plant
+tree,tree canopy,deciduous tree,coniferous tree,circular crown
+car,parked vehicle,automobile,small vehicle,car roof

@@ -736,8 +736,8 @@ class UnsupervisedThresholdCalibration:
         thresholds = {}
 
         print(f"\n[UnsupervisedCalibration] Per-Class Threshold (Non-Zero Adaptive):")
-        print(f"{'Class':<8} {'NonZero%':<10} {'Count':<8} {'P25':<10} {'Median':<10} {'P40':<10} {'Strategy':<15} {'Final':<10}")
-        print("-" * 95)
+        print(f"{'Class':<8} {'NonZero%':<10} {'Count':<8} {'P25':<10} {'Median':<10} {'P40':<10} {'P75':<10} {'Strategy':<15} {'Final':<10}")
+        print("-" * 105)
 
         for class_idx in sorted(self.raw_logits_per_class.keys()):
             logits_list = self.raw_logits_per_class[class_idx]
@@ -752,6 +752,7 @@ class UnsupervisedThresholdCalibration:
             p25 = np.percentile(logits_array, 25)
             median = np.percentile(logits_array, 50)
             p40 = np.percentile(logits_array, 40)
+            p75 = np.percentile(logits_array, 75)
             
             # 计算非零比例
             if class_idx in self.dataset_stats.nonzero_logit_stats:
@@ -783,7 +784,7 @@ class UnsupervisedThresholdCalibration:
             thresholds[class_idx] = threshold
 
             print(f"{class_idx:<8} {nonzero_ratio*100:<10.2f} {nonzero_count:<8} {p25:<10.4f} "
-                  f"{median:<10.4f} {p40:<10.4f} {strategy:<15} {threshold:<10.4f}")
+                  f"{median:<10.4f} {p40:<10.4f} {p75:<10.4f} {strategy:<15} {threshold:<10.4f}")
 
         return thresholds
 
@@ -817,8 +818,8 @@ class UnsupervisedThresholdCalibration:
         thresholds = {}
 
         print(f"\n[UnsupervisedCalibration] Instance Head Per-Class Threshold (Non-Zero Adaptive):")
-        print(f"{'Class':<8} {'NonZero%':<10} {'Count':<8} {'P25':<10} {'Median':<10} {'P40':<10} {'Strategy':<15} {'Final':<10}")
-        print("-" * 95)
+        print(f"{'Class':<8} {'NonZero%':<10} {'Count':<8} {'P25':<10} {'Median':<10} {'P40':<10} {'P75':<10} {'Strategy':<15} {'Final':<10}")
+        print("-" * 105)
 
         for class_idx in sorted(self.raw_logits_per_class.keys()):
             logits_list = self.raw_logits_per_class[class_idx]
@@ -834,6 +835,7 @@ class UnsupervisedThresholdCalibration:
             p25 = np.percentile(logits_array, 25)
             median = np.percentile(logits_array, 50)
             p40 = np.percentile(logits_array, 40)
+            p75 = np.percentile(logits_array, 75)
             
             # 计算该类别在全图中的大致非零比例（基于dataset_stats）
             if class_idx in self.dataset_stats.nonzero_logit_stats:
@@ -866,7 +868,7 @@ class UnsupervisedThresholdCalibration:
             thresholds[class_idx] = threshold
 
             print(f"{class_idx:<8} {nonzero_ratio*100:<10.2f} {nonzero_count:<8} {p25:<10.4f} "
-                  f"{median:<10.4f} {p40:<10.4f} {strategy:<15} {threshold:<10.4f}")
+                  f"{median:<10.4f} {p40:<10.4f} {p75:<10.4f} {strategy:<15} {threshold:<10.4f}")
 
         return thresholds
 

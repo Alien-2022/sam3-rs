@@ -5,7 +5,7 @@ dataset:
   data_root: data/OpenEarthMap
   img_dir: Exp/img
   mask_dir: Exp/mask
-  cls_file: cls_openearthmap.txt
+  cls_file: cls_openearthmap_ov3.txt
   ignore_index: 0
   # OpenEarthMap dataset uses labels 1-8 for 8 classes (0 is no-data).
   # We set reduce_zero_label=False to keep GT labels as-is:
@@ -22,13 +22,14 @@ dataloader:
   # OpenEarthMap images have different sizes (1000x1000, 1024x1024)
   # so we use a batch size of 1 to handle variable dimensions
   batch_size: 1
+  num_workers: 4
 
 segmentor:
   checkpoint_path: weights/sam3/sam3.pt
   # will be formatted as sam3/assets/bpe_simple_vocab_16e6.txt.gz
   bpe_path: bpe_simple_vocab_16e6.txt.gz
   # read by the model to build text prompts and map outputs.
-  prompts_file: cls_openearthmap.txt
+  prompts_file: cls_openearthmap_ov3.txt
   # confidence threshhold used to filter 200 queries output by decoder.
   confidence_threshold: 0.1
   prob_threshold: 0.1
@@ -52,9 +53,11 @@ segmentor:
   # ========================================
   # Statistics Analysis
   # ========================================
-  analyze_statistics: true  # Enable comprehensive statistics analysis
+  analyze_statistics: false  # Enable comprehensive statistics analysis
   compute_boundary_iou: false  # Enable boundary IoU computation (slower)
 
+  slide_crop_size: 512
+  slide_stride: 512
 output:
   # save_pred_dir: outputs/preds/openearthmap
   metrics_json: outputs/metrics/openearthmap.json

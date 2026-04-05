@@ -273,7 +273,7 @@ def save_heatmaps(logits, base_path, normalize=True):
     """
     if logits is None:
         return
-    logits_np = logits.cpu().numpy()
+    logits_np = logits.float().cpu().numpy()
     c, h, w = logits_np.shape
     for idx in range(c):
         heat = logits_np[idx]
@@ -294,7 +294,7 @@ def save_heatmaps_color(logits, base_path, cmap="jet", normalize=True):
     """
     if logits is None:
         return
-    logits_np = logits.cpu().numpy()
+    logits_np = logits.float().cpu().numpy()
     c, h, w = logits_np.shape
     for idx in range(c):
         heat = logits_np[idx]
@@ -454,7 +454,7 @@ def main():
     bpe_path = os.path.join(script_dir, "sam3", "assets", "bpe_simple_vocab_16e6.txt.gz")
 
     # Test image path
-    test_image_path = os.path.join(SAM_RS_DIR, "test/0.png")
+    test_image_path = os.path.join(SAM_RS_DIR, "test/top_potsdam_2_12_RGB.png")
 
 
     # Prompts file for multi-class segmentation
@@ -484,7 +484,7 @@ def main():
         use_semantic_head=True,
         use_instance_head=True,
         use_presence_score=True,
-        slide_crop_size=0,        # No sliding window for small images
+        slide_crop_size=2048,        # No sliding window for small images
         slide_stride=1024,
         prompts_file=prompts_file,
         use_prompted_background=use_prompted_background,

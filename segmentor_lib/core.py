@@ -492,6 +492,11 @@ class InferenceEngine:
                 if self.config.use_semantic_head:
                     sem_current = sem_mask_logits.squeeze(1)
 
+                    # Apply semantic head threshold BEFORE fusion (if configured)
+                    if self.config.semantic_prob_thresholds and class_id in self.config.semantic_prob_thresholds:
+                        sem_thresh = self.config.semantic_prob_thresholds[class_id]
+                        sem_current = sem_current * (sem_current >= sem_thresh).float()
+
                     # Apply presence score to semantic head if enabled
                     if self.config.use_presence_score and self.config.presence_score_mode == "before_fusion":
                         img_presence = (
@@ -543,7 +548,10 @@ class InferenceEngine:
                 del outputs, out_logits, out_masks, out_probs, presence_score
                 del mask_keep, mask_keep_expanded, scores
                 del inst_mask_logits, sem_mask_logits
-                del weighted_logits, inst_current, sem_current
+                if self.config.use_instance_head:
+                    del weighted_logits, inst_current
+                if self.config.use_semantic_head:
+                    del sem_current
                 del current_batch_logits
 
                 # Periodic GPU cache cleanup

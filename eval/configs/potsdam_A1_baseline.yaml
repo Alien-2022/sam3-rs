@@ -16,7 +16,7 @@ segmentor:
   prompts_file: cls_potsdam.txt
   # === 基线固定阈值（A1: 原始单词 + 固定阈值） ===
   # 模拟 SegEarth-OV3 默认策略：先融合，后用全局 prob_threshold 过滤
-  confidence_threshold: 0.1   # 实例头 query 过滤
+  confidence_threshold: 0.2   # 实例头 query 过滤
   prob_threshold: 0.1         # 融合后全局背景阈值
   # 不设置 instance_prob_thresholds / semantic_prob_thresholds（保持 None）
   # 即不做融合前分头过滤

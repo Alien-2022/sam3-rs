@@ -134,6 +134,11 @@ def build_segmentor(seg_cfg: Dict[str, Any]) -> SAM3RSSegmentor:
     # Pop deprecated prob_thresholds (now using instance/semantic_prob_thresholds)
     infer_kwargs.pop("prob_thresholds", None)
 
+    # Convert string keys to int keys for threshold dicts (YAML loads them as strings)
+    for key in ["semantic_prob_thresholds", "instance_prob_thresholds"]:
+        if key in infer_kwargs and infer_kwargs[key] is not None:
+            infer_kwargs[key] = {int(k): v for k, v in infer_kwargs[key].items()}
+
     infer_cfg = InferenceConfig(
         checkpoint_path=infer_kwargs.pop("checkpoint_path"),
         bpe_path=infer_kwargs.pop("bpe_path"),
@@ -346,7 +351,7 @@ def main() -> None:
             print(f"[eval] {processed}/{total_imgs} images done | Data: {t_data/(processed/8+1e-6):.3f}s/b | Infer: {t_infer/processed:.3f}s/i | Eval: {t_eval/processed:.3f}s/i", end="\r")
         t_eval += (time.time() - t_eval_start)
 
-        # if processed >= 5:
+        # if processed >= 100:
         #     break
         t_start_loop = time.time()
 

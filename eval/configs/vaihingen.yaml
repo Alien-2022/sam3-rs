@@ -31,23 +31,23 @@ segmentor:
   bpe_path: bpe_simple_vocab_16e6.txt.gz
   prompts_file: cls_vaihingen.txt
   # confidence threshhold used to filter 200 queries output by decoder.
-  confidence_threshold:  0.1582
+  confidence_threshold:  0.1494
 
   # Pre-fusion thresholds for each head (calibrated per-class)
   # Applied BEFORE dual-head fusion to preserve true distribution
   # prob_threshold: 0.1
   instance_prob_thresholds:
-    1: 0.0500 
-    2: 0.1592 
-    3: 0.0500
-    4: 0.0515    
-    5: 0.0500
+    1: 0.5
+    2: 0.5
+    3: 0.5   
+    4: 0.5   
+    5: 0.5
   semantic_prob_thresholds:
-    1: 0.0518 
-    2: 0.1660   
-    3: 0.1152 
-    4: 0.2539 
-    5: 0.6680 
+    1: 0.1670
+    2: 0.9258  
+    3: 0.1445 
+    4: 0.6719  
+    5: 0.9500
   use_instance_head: true
   use_presence_score: true
   use_semantic_head: true
@@ -78,5 +78,5 @@ segmentor:
   slide_stride: 512
 
 output:
-  # save_pred_dir: outputs/preds/vaihingen
+  save_pred_dir: outputs/preds/vaihingen
   metrics_json: outputs/metrics/vaihingen.json

@@ -1,7 +1,7 @@
 base_config: ./base.yaml
 
 dataloader:
-  batch_size: 2
+  batch_size: 4
   num_workers: 4
 
 dataset:
@@ -30,13 +30,28 @@ segmentor:
   # read by the model to build text prompts and map outputs.
   prompts_file: cls_loveda.txt
   # confidence threshhold used to filter 200 queries output by decoder.
-  confidence_threshold: 0.0251
+  confidence_threshold: 0.   # 实例头 query 过滤（OV3 默认 0.5）
 
   # Pre-fusion thresholds for each head (calibrated per-class)
   # Applied BEFORE dual-head fusion to preserve true distribution
   # Class indices match the order in cls_loveda.txt:
   # 0: background, 1: building, 2: road, 3: water, 4: barren, 5: forest, 6: agriculture
-  use_instance_head: true
+  # prob_threshold: 0.5         # 融合后全局背景阈值（OV3 默认 0.5）
+  # instance_prob_thresholds:
+  #   1: 0.2691  
+  #   2: 0.1767
+  #   3: 0.2529    
+  #   4: 0.1285    
+  #   5: 0.1545  
+  #   6: 0.2920 
+  semantic_prob_thresholds:
+    1: 0.4204
+    2: 0.3980   
+    3: 0.6612 
+    4: 0.1531  
+    5: 0.2022
+    6: 0.5263  
+  use_instance_head: false
   use_semantic_head: true
   use_presence_score: true
   bg_idx: 0
@@ -62,7 +77,7 @@ segmentor:
   # Enable detailed memory debugging
   debug_memory: false
   # Log file path for memory analysis (relative to project root)
-  debug_log_file: "outputs/memory_debug_eval.log"
+  debug_log_file: "assistant/memory_debug_eval.log"
   
   # sliding window parameters
   # LoveDA images are 1024x1024, set to 0 for single image mode (no sliding window)

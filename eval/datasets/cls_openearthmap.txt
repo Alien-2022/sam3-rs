@@ -1,8 +1,8 @@
-bareland,barren
-grass
-pavement
+bareland
+rangeland
+developed space
 road
-tree,forest
-water,river
-cropland
-building,roof,house
+tree
+water
+agriculture land
+building

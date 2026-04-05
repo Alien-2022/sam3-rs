@@ -1,0 +1,44 @@
+base_config: ./base.yaml
+
+dataloader:
+  batch_size: 4
+  num_workers: 4
+
+dataset:
+  name: loveda
+  data_root: data/LoveDA
+  img_dir: Exp/img
+  mask_dir: Exp/mask
+  cls_file: cls_loveda.txt
+  ignore_index: 255
+  reduce_zero_label: true
+  data_key: null
+
+segmentor:
+  checkpoint_path: weights/sam3/sam3.pt
+  bpe_path: bpe_simple_vocab_16e6.txt.gz
+  prompts_file: cls_loveda.txt
+  # === A1: 原始单词 + 固定阈值（对齐 SegEarth-OV3 cfg_loveda.py 默认值） ===
+  confidence_threshold: 0.5   # 实例头 query 过滤（OV3 默认 0.5）
+  prob_threshold: 0.5         # 融合后全局背景阈值（OV3 默认 0.5）
+  # 不设置 instance_prob_thresholds / semantic_prob_thresholds
+  use_instance_head: true
+  use_semantic_head: true
+  use_presence_score: true
+  bg_idx: 0
+  use_prompted_background: true
+  weight_key: null
+
+  semantic_enhancement_mode: "false"
+  analyze_presence_score: false
+  presence_score_mode: "before_fusion"
+  analyze_statistics: false
+  compute_boundary_iou: false
+  debug_memory: false
+
+  # LoveDA 图像 1024x1024，无需滑动窗口
+  slide_crop_size: 0
+  slide_stride: 1024
+
+output:
+  metrics_json: outputs/metrics/loveda_A1_baseline.json

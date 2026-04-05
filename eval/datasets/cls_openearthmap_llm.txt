@@ -1,0 +1,8 @@
+bareland,bare soil,brown ground,unvegetated surface
+rangeland,grassland,pasture,green meadow
+developed space,urban land,gray hard ground,built-up area
+road,highway,gray linear feature,asphalt pavement
+tree,tree canopy,green treetop,forest
+water,water body,river,pond
+agriculture land,farmland,cultivated field,green cropland
+building,structure,rectangular roof,construction,building footprint

@@ -105,6 +105,21 @@ def parse_args():
         help='Force single-view mode (uses sliding window for large images). Auto-detected if not specified.'
     )
     parser.add_argument(
+        '--background_names',
+        type=str,
+        nargs='*',
+        default=None,
+        help='Class names to exclude from calibration (default: ["background","clutter"]). '
+             'Set to empty (e.g. --background_names) to include all classes. '
+             'For Potsdam where clutter is a valid foreground class, use --background_names to include it.'
+    )
+    parser.add_argument(
+        '--no_exclude_background',
+        action='store_true',
+        help='Disable background exclusion entirely (include all classes in calibration)'
+    )
+    
+    parser.add_argument(
         '--head_type',
         type=str,
         default='auto',
@@ -241,7 +256,9 @@ def main():
         prob_percentile=args.prob_percentile,
         use_per_class_prob=args.per_class_prob,
         batch_size=args.batch_size,
-        force_single_view=args.force_single_view
+        force_single_view=args.force_single_view,
+        exclude_background=not args.no_exclude_background,
+        background_names=args.background_names
     )
 
     # Determine threshold type based on head_type
@@ -299,4 +316,5 @@ def main():
 
 
 if __name__ == '__main__':
+    # python demo_calibration.py --config eval/configs/potsdam_B2_calib.yaml  --num_samples 24 --per_class_prob --force_single_view --no_exclude_background  --output test/calib/potsdam_B2_calib.txt
     main()

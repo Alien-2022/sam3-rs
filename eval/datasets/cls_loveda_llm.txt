@@ -1,0 +1,7 @@
+background,other area,unclassified region,unknown terrain
+building,gray roof,rectangular structure,concrete rooftop
+road,gray linear path,asphalt surface,linear strip
+water,dark water surface,river channel,pond
+barren,bare soil,brown ground,exposed earth
+forest,tree canopy,green vegetation,woody vegetation
+agricultural,farmland,cultivated field,crop land
