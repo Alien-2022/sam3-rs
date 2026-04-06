@@ -1,0 +1,7 @@
+background
+building,roof
+road
+water
+dirt,sand,bare ground
+forest,tree
+farm,field,crop

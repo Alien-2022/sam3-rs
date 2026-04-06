@@ -56,8 +56,8 @@ segmentor:
   analyze_statistics: false  # Enable comprehensive statistics analysis
   compute_boundary_iou: false  # Enable boundary IoU computation (slower)
 
-  slide_crop_size: 512
-  slide_stride: 512
+  # slide_crop_size: 512
+  # slide_stride: 512
 output:
   # save_pred_dir: outputs/preds/openearthmap
   metrics_json: outputs/metrics/openearthmap.json

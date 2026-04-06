@@ -1,0 +1,8 @@
+bare ground,dirt
+grass,meadow
+parking lot,plaza
+road
+tree
+water,lake
+farm,field
+building,house

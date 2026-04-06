@@ -1,0 +1,6 @@
+water body,tennis court,swimming pool
+road,pavement
+building,roof
+grass,lawn
+tree
+car,vehicle

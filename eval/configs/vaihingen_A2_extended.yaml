@@ -5,7 +5,7 @@ dataset:
   data_root: data/Vaihingen
   img_dir: Exp/img
   mask_dir: Exp/mask
-  cls_file: cls_vaihingen_llm.txt
+  cls_file: cls_vaihingen_llm_v2.txt
   ignore_index: 255
   reduce_zero_label: false
   data_key: null
@@ -13,7 +13,7 @@ dataset:
 segmentor:
   checkpoint_path: weights/sam3/sam3.pt
   bpe_path: bpe_simple_vocab_16e6.txt.gz
-  prompts_file: cls_vaihingen_llm.txt
+  prompts_file: cls_vaihingen_llm_v2.txt
   # === A1: 原始单词 + 固定阈值（对齐 SegEarth-OV3 cfg_vaihingen.py 默认值） ===
   confidence_threshold: 0.4   # 实例头 query 过滤（OV3 默认 0.4）
   prob_threshold: 0.1         # 融合后全局背景阈值

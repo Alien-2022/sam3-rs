@@ -1,0 +1,8 @@
+bareland,exposed soil,brown patchy surface,unvegetated ground
+rangeland,sparse grassland,patchy shrub cover,dry herbaceous surface
+developed space,gray-brown built-up area,heterogeneous urban fabric,asphalt-concrete mosaic
+road,linear asphalt strip,smooth gray band,curvilinear paved trace
+tree,tree canopy,circular crown,dense green canopy
+water,blue-black smooth surface,specular water body,sinuous blue ribbon
+agriculture land,rectangular crop plot,ridged soil pattern,green-yellow checkerboard
+building,rectangular roof,flat roof silhouette,gray concrete structure
