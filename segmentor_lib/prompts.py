@@ -1,8 +1,7 @@
 """Prompt management module for SAM3-RS.
 
 This module provides core functionality for loading prompts and
-pre-computing text features. For semantic enhancement features,
-see segmentor_lib.experimental.semantic_enhancement.
+pre-computing text features.
 """
 
 import os

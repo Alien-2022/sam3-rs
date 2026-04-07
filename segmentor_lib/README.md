@@ -226,7 +226,7 @@ else:
 
 ```bash
 # 运行校准脚本
-python demo_calibration.py \
+python eval/calibration_demo.py \
     --config eval/configs/loveda.yaml \
     --num_samples 50 \
     --confidence_percentile 30 \

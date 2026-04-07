@@ -10,7 +10,7 @@ without requiring labeled data.
 ==============================================================================
 
 【基本用法 / Basic Usage】
-    python demo_calibration.py --config eval/configs/loveda.yaml
+    python eval/calibration_demo.py --config eval/configs/loveda.yaml
 
 【常用参数 / Common Arguments】
     --num_samples N          校准使用的样本数量 (default: 50)
@@ -23,10 +23,10 @@ without requiring labeled data.
 【不同数据集的使用场景 / Dataset-Specific Usage】
 
 1. LoveDA (1024x1024, 小图) - 自动使用批量推理:
-    python demo_calibration.py --config eval/configs/loveda.yaml --num_samples 50
+    python eval/calibration_demo.py --config eval/configs/loveda.yaml --num_samples 50
 
 2. Potsdam (6000x6000, 大图) - 自动检测大图，使用单图+滑动窗口:
-    python demo_calibration.py --config eval/configs/potsdam.yaml --num_samples 24
+    python eval/calibration_demo.py --config eval/configs/potsdam.yaml --num_samples 24
    或手动强制单图模式:
     python demo_calibration.py --config eval/configs/potsdam.yaml --force_single_view --batch_size 1
 
@@ -178,7 +178,6 @@ def main():
         use_instance_head=config_dict['segmentor'].get('use_instance_head', True),
         use_presence_score=config_dict['segmentor'].get('use_presence_score', True),
         presence_score_mode=config_dict['segmentor'].get('presence_score_mode', 'before_fusion'),
-        semantic_enhancement_mode=config_dict['segmentor'].get('semantic_enhancement_mode', 'false'),
         slide_crop_size=config_dict['segmentor'].get('slide_crop_size', 0),
         slide_stride=config_dict['segmentor'].get('slide_stride', 512),
         prompts_file=prompts_file,
@@ -316,5 +315,5 @@ def main():
 
 
 if __name__ == '__main__':
-    # python demo_calibration.py --config eval/configs/potsdam_B2_calib.yaml  --num_samples 24 --per_class_prob --force_single_view --no_exclude_background  --output test/calib/potsdam_B2_calib.txt
+    # python eval/calibration_demo.py --config eval/configs/potsdam_B2_calib.yaml  --num_samples 24 --per_class_prob --force_single_view --no_exclude_background  --output test/calib/potsdam_B2_calib.txt
     main()

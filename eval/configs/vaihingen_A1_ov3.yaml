@@ -25,7 +25,6 @@ segmentor:
   use_prompted_background: true
   weight_key: null
 
-  semantic_enhancement_mode: "false"
   analyze_presence_score: false
   presence_score_mode: "before_fusion"
   analyze_statistics: false

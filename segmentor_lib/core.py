@@ -41,12 +41,8 @@ class InferenceEngine:
             self.query_indices = torch.tensor(
                 prompts["indices"], dtype=torch.int64, device=device
             )
-            # Store avg_embeddings if available (from semantic enhancement with avg)
-            self.avg_embeddings = prompts.get("avg_embeddings", None)
-            if self.avg_embeddings:
-                print(f"✓ Using pre-computed average embeddings for {len(self.avg_embeddings)} classes")
         else:
-            self.avg_embeddings = None
+            self.query_indices = None
 
         # Initialize analyzers
         self.analyzers = []
@@ -150,24 +146,8 @@ class InferenceEngine:
                     inference_state["geometric_prompt"] = self.processor.model._get_dummy_prompt()
 
                 output = None
-                # Priority 1: avg_embeddings (semantic enhancement with average)
-                if self.avg_embeddings and class_id in self.avg_embeddings:
-                    avg_emb = self.avg_embeddings[class_id]
-                    backbone_out.update({
-                        "language_features": avg_emb["language_features"],
-                        "language_mask": avg_emb["language_mask"],
-                        "language_embeds": avg_emb["language_embeds"],
-                    })
-                    # Run grounding inference
-                    self.memory_debugger.log_cuda_memory(f"  [Before _forward_grounding] using avg_embeddings")
-                    output = self.processor._forward_grounding(inference_state)
-                    self.memory_debugger.log_cuda_memory(f"  [After _forward_grounding] using avg_embeddings")
-                    if output and isinstance(output, dict):
-                        for k, v in output.items():
-                            if isinstance(v, torch.Tensor):
-                                self.memory_debugger.log_tensor_memory(f"  output.{k}", v)
-                # Priority 2: text_features_cache (standard pre-computation)
-                elif self.text_features_cache is not None and prompt_idx in self.text_features_cache:
+                # Use pre-computed text features if available, otherwise real-time encoding
+                if self.text_features_cache is not None and prompt_idx in self.text_features_cache:
                     cached_features = self.text_features_cache[prompt_idx]
                     backbone_out.update({
                         "language_features": cached_features["language_features"],
@@ -396,19 +376,10 @@ class InferenceEngine:
                     if k in backbone_out:
                         del backbone_out[k]
 
-                # Get pre-computed text features from cache or avg_embeddings
+                # Get pre-computed text features from cache
                 class_id = self.prompts["indices"][prompt_idx]
 
-                # Priority 1: avg_embeddings (semantic enhancement with average)
-                if self.avg_embeddings and class_id in self.avg_embeddings:
-                    avg_emb = self.avg_embeddings[class_id]
-                    backbone_out.update({
-                        "language_features": avg_emb["language_features"],
-                        "language_mask": avg_emb["language_mask"],
-                        "language_embeds": avg_emb["language_embeds"],
-                    })
-                # Priority 2: text_features_cache (standard pre-computation)
-                elif self.text_features_cache is not None and prompt_idx in self.text_features_cache:
+                if self.text_features_cache is not None and prompt_idx in self.text_features_cache:
                     cached_features = self.text_features_cache[prompt_idx]
                     backbone_out.update({
                         "language_features": cached_features["language_features"],

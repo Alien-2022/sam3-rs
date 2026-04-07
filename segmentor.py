@@ -58,14 +58,6 @@ class InferenceConfig:
     presence_score_mode: str = "after_fusion"
     # presence_score_mode: str = "before_fusion"
 
-    # Semantic enhancement in text space
-    # - False (default): use all synonyms separately and fuse results (original behavior)
-    # - "select_word": select the most representative synonym for each class
-    # - "avg_embedding": use average embedding of synonyms for each class
-    # If True (legacy): equivalent to "select_word" mode
-    # Semantic enhancement mode: "false" (disabled), "select_word", "avg_embedding"
-    semantic_enhancement_mode: str = "false"
-
     # Large image handling
     slide_crop_size: int = 0  # 0 means no sliding
     slide_stride: int = 512
@@ -160,33 +152,10 @@ class SAM3RSSegmentor:
                 f"✓ SAM3-RS initialized with {self.num_classes} classes, {self.num_prompts} prompts"
             )
 
-        # Apply semantic enhancement if enabled
-        enhancement_mode = config.semantic_enhancement_mode.lower()
-        if enhancement_mode == 'select_word':
-            print("Using semantic enhancement: select representative word mode")
-            from segmentor_lib.experimental.semantic_enhancement import apply_semantic_enhancement
-            self.prompts = apply_semantic_enhancement(
-                self.processor, self.prompts, self.num_classes, self.device
-            )
-            self.num_prompts = len(self.prompts["names"])
-            # Pre-compute text features for the selected representative words
-            self.text_features_cache = precompute_text_features(
-                self.processor, self.prompts, self.device, self.num_prompts
-            )
-        elif enhancement_mode == 'avg_embedding':
-            print("Using semantic enhancement: average embedding mode")
-            from segmentor_lib.experimental.semantic_enhancement import apply_semantic_enhancement_with_avg_embedding
-            self.prompts = apply_semantic_enhancement_with_avg_embedding(
-                self.processor, self.prompts, self.num_classes, self.device
-            )
-            self.num_prompts = len(self.prompts["names"])
-            # Skip precompute_text_features since we already have avg_embeddings
-            self.text_features_cache = None
-        else:
-            # No semantic enhancement: pre-compute text features normally
-            self.text_features_cache = precompute_text_features(
-                self.processor, self.prompts, self.device, self.num_prompts
-            )
+        # Pre-compute text features for all prompts
+        self.text_features_cache = precompute_text_features(
+            self.processor, self.prompts, self.device, self.num_prompts
+        )
 
         # Initialize inference engine with analyzers
         self.engine = InferenceEngine(

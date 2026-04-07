@@ -488,8 +488,6 @@ def main():
         slide_stride=1024,
         prompts_file=prompts_file,
         use_prompted_background=use_prompted_background,
-        # Experimental features (disabled by default)
-        semantic_enhancement_mode="false",
     )
 
     segmentor = SAM3RSSegmentor(config)
