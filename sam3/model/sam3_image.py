@@ -567,9 +567,14 @@ class Sam3Image(torch.nn.Module):
         #     - visual_prompt_embed: [0, 1, 256] - visual prompt tokens (empty by default)
         #   prompt_mask: [1, 33] - attention mask for the prompt tensor
         #   backbone_out:
+        # Support optional visual_prompt_embed from backbone_out (for visual prototype injection)
+        visual_prompt_embed = backbone_out.pop("visual_prompt_embed", None)
+        visual_prompt_mask = backbone_out.pop("visual_prompt_mask", None)
         with torch.profiler.record_function("SAM3Image._encode_prompt"):
             prompt, prompt_mask, backbone_out = self._encode_prompt(
-                backbone_out, find_input, geometric_prompt
+                backbone_out, find_input, geometric_prompt,
+                visual_prompt_embed=visual_prompt_embed,
+                visual_prompt_mask=visual_prompt_mask,
             )
 
         # Run the encoder

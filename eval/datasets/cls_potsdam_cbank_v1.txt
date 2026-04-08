@@ -1,0 +1,6 @@
+water body,tennis court,swimming pool,water surface,pond,lake,river channel,sports field,playground,open space,bare soil,sand,gravel,parking lot,courtyard,plaza,square,athletic field,bowling green,running track
+road,pavement,street,highway,path,walkway,sidewalk,driveway,lane,alley,boulevard,avenue,trail,track,asphalt surface,concrete path,crossing,intersection,roadway,paved ground
+building,roof,house,structure,warehouse,residential building,commercial building,apartment,office building,rooftop,building facade,dwelling,complex,tower block,industrial building,garage,shed,shop front,church,clock tower
+grass,lawn,low vegetation,meadow,turf,grassland,pasture,green area,vegetation,herbaceous plant,ground cover,garden,yard,greenery,vegetation cover,field,crop field,farmland,hay field,herb garden
+tree,trees,forest,woodland,canopy,tree crown,tree top,wood,grove,stand of trees,copse,timber,arboretum,tree canopy,deciduous tree,conifer tree,tree group,hedge,thicket,plantation
+car,vehicle,automobile,truck,bus,van,motorcycle,bike,bicycle,transport,motor vehicle,passenger car,taxi,sedan,SUV,minivan,pickup truck,jeep,utility vehicle,trailer

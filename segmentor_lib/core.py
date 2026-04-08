@@ -126,6 +126,13 @@ class InferenceEngine:
                 "mode": "single_view"
             })
 
+            # Pre-compute per-class geometric prompts from visual prototypes (geo_box mode)
+            inject_mode = getattr(self, 'prototype_inject_mode', 'lang')
+            proto_geo_prompts = None
+            if inject_mode == "geo_box" and self.visual_prototype_bank is not None:
+                backbone_out_preview = inference_state["backbone_out"]
+                proto_geo_prompts = self._compute_proto_geo_prompts(backbone_out_preview, batch_size=1)
+
             # Process each prompt
             for prompt_idx, prompt_word in enumerate(self.prompts["names"]):
                 # 显存追踪：每个prompt开始
@@ -135,25 +142,56 @@ class InferenceEngine:
                 # Reset prompts for clean inference
                 self.processor.reset_all_prompts(inference_state)
 
-                # Get backbone_out for this image
+                # Get backbone_out for this image (cache original for vision injection)
                 backbone_out = inference_state["backbone_out"]
+                original_backbone_fpn = backbone_out.get("backbone_fpn")
 
                 # Get class_id for this prompt
                 class_id = self.prompts["indices"][prompt_idx]
 
-                # Ensure geometric_prompt exists (needed for _forward_grounding)
-                if "geometric_prompt" not in inference_state:
+                # Set geometric_prompt: use proto-based box prompt or dummy
+                if proto_geo_prompts is not None and prompt_idx in proto_geo_prompts:
+                    inference_state["geometric_prompt"] = proto_geo_prompts[prompt_idx]
+                elif "geometric_prompt" not in inference_state:
                     inference_state["geometric_prompt"] = self.processor.model._get_dummy_prompt()
+
+                # Inject visual prototype into vision features if in vision mode
+                if inject_mode == "vision":
+                    self._inject_proto_to_vision(backbone_out, class_id)
 
                 output = None
                 # Use pre-computed text features if available, otherwise real-time encoding
                 if self.text_features_cache is not None and prompt_idx in self.text_features_cache:
                     cached_features = self.text_features_cache[prompt_idx]
-                    backbone_out.update({
-                        "language_features": cached_features["language_features"],
-                        "language_mask": cached_features["language_mask"],
-                        "language_embeds": cached_features["language_embeds"],
-                    })
+                    # Inject visual prototype
+                    if inject_mode == "concat":
+                        # Concat mode: append prototype as extra token
+                        injected = self._inject_proto_as_token(cached_features, class_id)
+                        backbone_out.update(injected)
+                    elif inject_mode == "replace_last":
+                        injected = self._inject_proto_replace_last(cached_features, class_id)
+                        backbone_out.update(injected)
+                    elif (inject_mode == "lang"
+                            and self.visual_prototype_bank is not None
+                            and class_id in self.visual_prototype_bank):
+                        proto = self.visual_prototype_bank[class_id]  # [1, 1, 256], L2-norm=1
+                        lang_feats = cached_features["language_features"].to(self.device)
+                        proto = proto.to(self.device).to(lang_feats.dtype)
+                        # Scale-aligned injection: scale proto to text_features norm * alpha
+                        text_norm = lang_feats.norm()
+                        alpha = getattr(self, 'prototype_alpha', 1.0)
+                        lang_feats = lang_feats + alpha * text_norm * proto
+                        backbone_out.update({
+                            "language_features": lang_feats,
+                            "language_mask": cached_features["language_mask"],
+                            "language_embeds": cached_features.get("language_embeds"),
+                        })
+                    else:
+                        backbone_out.update({
+                            "language_features": cached_features["language_features"],
+                            "language_mask": cached_features["language_mask"],
+                            "language_embeds": cached_features["language_embeds"],
+                        })
                     # Run grounding inference
                     self.memory_debugger.log_cuda_memory(f"  [Before _forward_grounding] using cached text features")
                     output = self.processor._forward_grounding(inference_state)
@@ -279,6 +317,10 @@ class InferenceEngine:
 
                 seg_logits[prompt_idx] = current_logits
 
+                # Restore original backbone_fpn if vision injection was applied
+                if original_backbone_fpn is not None:
+                    backbone_out["backbone_fpn"] = original_backbone_fpn
+
                 # ===== Clean up current prompt's intermediate variables =====
                 del output
                 if self.config.use_instance_head:
@@ -337,6 +379,9 @@ class InferenceEngine:
             # 2. Image feature extraction (Encoder) - batch parallel
             backbone_out = self.processor.model.backbone.forward_image(batch_input)
 
+            # Cache original backbone_fpn for vision injection restoration
+            original_backbone_fpn = backbone_out.get("backbone_fpn")
+
             # Call before_inference hooks
             self._call_hooks('on_before_inference', {
                 "images": images,
@@ -368,6 +413,12 @@ class InferenceEngine:
                 num_prompts=batch_size
             )
 
+            # Pre-compute per-class geometric prompts from visual prototypes (geo_box mode)
+            inject_mode = getattr(self, 'prototype_inject_mode', 'lang')
+            proto_geo_prompts = None
+            if inject_mode == "geo_box" and self.visual_prototype_bank is not None:
+                proto_geo_prompts = self._compute_proto_geo_prompts(backbone_out, batch_size)
+
             # 3. Loop through each Prompt (Decoder / Grounding)
             for prompt_idx, prompt_word in enumerate(self.prompts["names"]):
                 # ===== Use pre-computed text features =====
@@ -379,13 +430,41 @@ class InferenceEngine:
                 # Get pre-computed text features from cache
                 class_id = self.prompts["indices"][prompt_idx]
 
+                # Inject visual prototype into vision features if in vision mode
+                if inject_mode == "vision":
+                    self._inject_proto_to_vision(backbone_out, class_id)
+
                 if self.text_features_cache is not None and prompt_idx in self.text_features_cache:
                     cached_features = self.text_features_cache[prompt_idx]
-                    backbone_out.update({
-                        "language_features": cached_features["language_features"],
-                        "language_mask": cached_features["language_mask"],
-                        "language_embeds": cached_features["language_embeds"],
-                    })
+                    # Inject visual prototype
+                    if inject_mode == "concat":
+                        # Concat mode: append prototype as extra token
+                        injected = self._inject_proto_as_token(cached_features, class_id)
+                        backbone_out.update(injected)
+                    elif inject_mode == "replace_last":
+                        injected = self._inject_proto_replace_last(cached_features, class_id)
+                        backbone_out.update(injected)
+                    elif (inject_mode == "lang"
+                            and self.visual_prototype_bank is not None
+                            and class_id in self.visual_prototype_bank):
+                        proto = self.visual_prototype_bank[class_id]  # [1, 1, 256], L2-norm=1
+                        lang_feats = cached_features["language_features"].to(self.device)
+                        proto = proto.to(self.device).to(lang_feats.dtype)
+                        # Scale-aligned injection: scale proto to text_features norm * alpha
+                        text_norm = lang_feats.norm()
+                        alpha = getattr(self, 'prototype_alpha', 1.0)
+                        lang_feats = lang_feats + alpha * text_norm * proto
+                        backbone_out.update({
+                            "language_features": lang_feats,
+                            "language_mask": cached_features["language_mask"],
+                            "language_embeds": cached_features.get("language_embeds"),
+                        })
+                    else:
+                        backbone_out.update({
+                            "language_features": cached_features["language_features"],
+                            "language_mask": cached_features["language_mask"],
+                            "language_embeds": cached_features["language_embeds"],
+                        })
                 else:
                     # Fallback to real-time computation
                     text_outputs = self.processor.model.backbone.forward_text(
@@ -393,11 +472,17 @@ class InferenceEngine:
                     )
                     backbone_out.update(text_outputs)
 
+                # Select geometric prompt: proto-based box or dummy
+                if proto_geo_prompts is not None and prompt_idx in proto_geo_prompts:
+                    geo_prompt = proto_geo_prompts[prompt_idx]
+                else:
+                    geo_prompt = dummy_geometric
+
                 # Decoding stage (Grounding) - process Batch
                 outputs = self.processor.model.forward_grounding(
                     backbone_out=backbone_out,
                     find_input=find_stage,
-                    geometric_prompt=dummy_geometric,
+                    geometric_prompt=geo_prompt,
                     find_target=None,
                 )
 
@@ -489,6 +574,10 @@ class InferenceEngine:
                 # Store in batch_seg_logits
                 batch_seg_logits[:, prompt_idx] = current_batch_logits
 
+                # Restore original backbone_fpn if vision injection was applied
+                if original_backbone_fpn is not None:
+                    backbone_out["backbone_fpn"] = original_backbone_fpn
+
                 # Collect per-class detailed results if requested (boxes and scores)
                 if detailed and batch_per_class_results is not None:
                     # inst_mask_logits: [B, 200, H, W], scores: [B, 200], mask_keep: [B, 200]
@@ -560,6 +649,162 @@ class InferenceEngine:
         """Set the pre-computed text features cache."""
         self.text_features_cache = cache
 
+    def set_visual_prototype_bank(self, prototypes: Optional[Dict[int, torch.Tensor]],
+                                   alpha: float = 1.0, mode: str = "lang",
+                                   geo_threshold: float = 0.3, geo_topk: int = 10,
+                                   geo_correlation: str = "cosine",
+                                   geo_presence_threshold: float = 0.0,
+                                   geo_fpn_level: int = -1):
+        """Set the visual prototype bank for class-conditional visual guidance.
+
+        Args:
+            prototypes: Dict mapping class_id -> prototype tensor [1, 1, 256] (L2-normalized).
+            alpha: Injection strength. Default 1.0.
+            mode: Injection mode.
+                - "lang": add to language_features (text encoder space, cross-space addition)
+                - "concat": append prototype as an extra token to language_features
+                - "replace_last": replace last token with scaled prototype
+                - "vision": add to backbone_fpn[-1] (vision backbone space)
+                - "geo_box": bounding boxes from response maps → geometric prompts
+                - "geo_point": top-K points from response maps → geometric prompts
+            geo_threshold: threshold for response map binarization (box mode only).
+            geo_topk: number of top-K points to select as point prompts (point mode only).
+            geo_correlation: correlation method for response map computation.
+                - "cosine": cosine similarity (default)
+                - "dot": raw dot product (preserves magnitude)
+                - "euclidean_inv": inverse euclidean distance 1/(1+||f-p||)
+                - "channel_attn": channel-wise attention weighting
+            geo_presence_threshold: minimum max-response value to add geo prompt.
+                0.0 = always add (default). Set higher to filter absent classes.
+            geo_fpn_level: which FPN level to compute response map on.
+                -1 = 72x72 (default, matches encoder), -2 = 144x144, -3 = 288x288.
+                Points/boxes are always normalized to [0,1] so any level works.
+        """
+        self.visual_prototype_bank = prototypes
+        self.prototype_alpha = alpha
+        self.prototype_inject_mode = mode
+        self.geo_box_threshold = geo_threshold
+        self.geo_topk = geo_topk
+        self.geo_correlation = geo_correlation
+        self.geo_presence_threshold = geo_presence_threshold
+        self.geo_fpn_level = geo_fpn_level
+
+    def _inject_proto_as_token(self, cached_features: dict, class_id: int) -> dict:
+        """Append visual prototype as an extra token to language_features.
+
+        Extends language_features from [32, 1, 256] to [33, 1, 256] and
+        language_mask from [1, 32] to [1, 33]. The prototype is scaled to
+        match the norm of the original language_features (mean per-token norm),
+        so the cross-attention can naturally attend to it.
+
+        Returns:
+            dict with updated language_features, language_mask, language_embeds.
+        """
+        if self.visual_prototype_bank is None or class_id not in self.visual_prototype_bank:
+            return cached_features
+
+        proto = self.visual_prototype_bank[class_id]  # [1, 1, 256], L2-norm=1
+        lang_feats = cached_features["language_features"].to(self.device)  # [T, 1, 256]
+        lang_mask = cached_features["language_mask"].to(self.device)       # [1, T]
+        alpha = getattr(self, 'prototype_alpha', 1.0)
+
+        T, B, D = lang_feats.shape  # T=32, B=1, D=256
+
+        # Scale prototype to match per-token norm of language_features
+        # lang_feats norm ~ 93 globally, per-token norm ~ 93/sqrt(32) ~ 16.4
+        per_token_norm = lang_feats.flatten(1).norm(dim=1).mean()  # mean L2 norm per token
+        proto_token = alpha * per_token_norm * proto  # [1, 1, 256]
+        proto_token = proto_token.to(lang_feats.dtype)  # match dtype (bfloat16)
+
+        # Concatenate: [T, 1, 256] + [1, 1, 256] -> [T+1, 1, 256]
+        new_feats = torch.cat([lang_feats, proto_token], dim=0)  # [33, 1, 256]
+
+        # Extend mask: [1, 32] -> [1, 33], new token is valid (False = not masked)
+        new_mask = torch.cat([
+            lang_mask,
+            torch.zeros(1, 1, dtype=lang_mask.dtype, device=self.device),
+        ], dim=1)  # [1, 33]
+
+        # language_embeds is NOT used by the grounding decoder, pass through unchanged
+        return {
+            "language_features": new_feats,
+            "language_mask": new_mask,
+            "language_embeds": cached_features.get("language_embeds"),
+        }
+
+    def _inject_proto_replace_last(self, cached_features: dict, class_id: int) -> dict:
+        """Replace the last token of language_features with a scaled visual prototype.
+
+        Keeps shape [32, 1, 256] and mask [1, 32] unchanged. The prototype is scaled
+        to match the per-token norm of language_features so it looks like a natural text
+        token to the cross-attention layers.
+
+        Returns:
+            dict with updated language_features, language_mask, language_embeds.
+        """
+        if self.visual_prototype_bank is None or class_id not in self.visual_prototype_bank:
+            return cached_features
+
+        proto = self.visual_prototype_bank[class_id]  # [1, 1, 256], L2-norm=1
+        lang_feats = cached_features["language_features"].to(self.device)  # [T, 1, 256]
+        alpha = getattr(self, 'prototype_alpha', 1.0)
+
+        T, B, D = lang_feats.shape  # T=32, B=1, D=256
+
+        # Scale prototype to match per-token norm
+        per_token_norm = lang_feats.flatten(1).norm(dim=1).mean()
+        proto_scaled = alpha * per_token_norm * proto  # [1, 1, 256]
+        proto_scaled = proto_scaled.to(lang_feats.dtype)
+
+        # Replace last token (clone to avoid modifying cached features)
+        new_feats = lang_feats.clone()
+        new_feats[-1:] = proto_scaled  # replace position T-1
+
+        return {
+            "language_features": new_feats,
+            "language_mask": cached_features["language_mask"],
+            "language_embeds": cached_features.get("language_embeds"),
+        }
+
+    def _inject_proto_to_vision(self, backbone_out: dict, class_id: int):
+        """Inject visual prototype into backbone_fpn[-1] (vision feature space).
+
+        Prototype is broadcast-added to all spatial positions of the last FPN level.
+        This works because the prototype was extracted from the same FPN level and
+        thus lives in the same feature space.
+        """
+        if self.visual_prototype_bank is None or class_id not in self.visual_prototype_bank:
+            return
+        if "backbone_fpn" not in backbone_out:
+            return
+
+        fpn = backbone_out["backbone_fpn"]
+        if not isinstance(fpn, list) or len(fpn) == 0:
+            return
+
+        proto = self.visual_prototype_bank[class_id]  # [1, 1, 256]
+        # Target the last FPN level (same level used for prototype extraction)
+        feat = fpn[-1]  # [B, C, H, W], e.g. [1, 256, 72, 72]
+        proto = proto.to(feat.device, dtype=feat.dtype)  # [1, 1, 256]
+
+        # Scale: alpha * feat_channel_norm * proto
+        # feat_channel_norm = mean L2 norm across spatial positions (per-channel)
+        alpha = getattr(self, 'prototype_alpha', 1.0)
+        # Use the mean spatial feature norm as reference
+        spatial_feats = feat.flatten(2).permute(0, 2, 1)  # [B, HW, C]
+        feat_norm = spatial_feats.norm(dim=-1).mean()  # scalar: mean L2 norm of spatial vectors
+        scaled_proto = alpha * feat_norm * proto  # [1, 1, 256]
+
+        # Broadcast add: [1, 1, 256] -> [B, C, H, W]
+        # proto shape [1, 1, 256] = [B_spatial=1, C=1, D=256], need to match [B, 256, H, W]
+        # Reshape proto to [1, 256, 1, 1] and broadcast
+        scaled_proto = scaled_proto.squeeze(0).permute(1, 0).unsqueeze(-1).unsqueeze(-1)  # [256, 1, 1]
+
+        # Deep copy the FPN list to avoid modifying cached features for other prompts
+        fpn_new = list(fpn)
+        fpn_new[-1] = feat + scaled_proto  # [B, 256, H, W]
+        backbone_out["backbone_fpn"] = fpn_new
+
     def _masks_to_boxes(self, masks: torch.Tensor) -> torch.Tensor:
         """Convert binary masks to bounding boxes.
 
@@ -603,3 +848,229 @@ class InferenceEngine:
         boxes = torch.stack([x1, y1, x2, y2], dim=1)
 
         return boxes
+
+    def _compute_proto_geo_prompts(self, backbone_out: dict, batch_size: int):
+        """Compute per-class geometric (box) prompts from visual prototype response maps.
+
+        For each class with a visual prototype:
+        1. Select FPN level and extract features
+        2. Compute response map between spatial features and prototype
+        3. Presence filtering: skip classes with max-response below threshold
+        4. Extract geometric prompts:
+           - "geo_box": threshold → binary mask → bounding box
+           - "geo_point": top-K highest response points
+        5. Return Prompt objects per prompt_idx
+
+        Args:
+            backbone_out: Dict containing backbone features (must have "backbone_fpn")
+            batch_size: Number of images in the batch
+
+        Returns:
+            Dict mapping prompt_idx -> Prompt object with geometric prompt,
+            or empty Prompt if the class has no prototype or response too weak.
+        """
+        from sam3.model.geometry_encoders import Prompt
+
+        if self.visual_prototype_bank is None:
+            return {}
+
+        if "backbone_fpn" not in backbone_out:
+            return {}
+
+        fpn_list = backbone_out["backbone_fpn"]
+        fpn_level = getattr(self, 'geo_fpn_level', -1)
+        fpn_feats = fpn_list[fpn_level]  # [B, 256, H, W]
+        B, C, H, W = fpn_feats.shape
+        device = fpn_feats.device
+        dtype = fpn_feats.dtype
+
+        # Compute spatial features: [B, 256, H*W]
+        feats_flat = fpn_feats.flatten(2)  # [B, 256, H*W]
+
+        geo_mode = getattr(self, 'prototype_inject_mode', 'lang')
+        correlation = getattr(self, 'geo_correlation', 'cosine')
+        threshold = getattr(self, 'geo_box_threshold', 0.3)
+        topk = getattr(self, 'geo_topk', 10)
+        presence_thresh = getattr(self, 'geo_presence_threshold', 0.0)
+
+        prompt_geo = {}
+
+        for prompt_idx in range(self.num_prompts):
+            class_id = self.prompts["indices"][prompt_idx]
+
+            if class_id not in self.visual_prototype_bank:
+                prompt_geo[prompt_idx] = Prompt()  # empty prompt (CLS token only)
+                continue
+
+            proto = self.visual_prototype_bank[class_id].to(device, dtype=dtype)  # [1, 1, 256]
+            proto_flat = proto.flatten(1)  # [1, 256]
+
+            # Compute response map based on correlation method
+            response = self._compute_response_map(feats_flat, proto_flat, B, H, W,
+                                                   method=correlation)  # [B, H, W]
+
+            # Presence filtering: skip if max response too low
+            max_response = response.view(B, -1).max(dim=1)[0]  # [B]
+            if (max_response < presence_thresh).all():
+                prompt_geo[prompt_idx] = Prompt()
+                continue
+
+            # Build geometric prompt based on mode
+            if geo_mode == "geo_box":
+                prompt_geo[prompt_idx] = self._build_box_prompt(
+                    response, B, H, W, device, dtype, threshold)
+            elif geo_mode == "geo_point":
+                prompt_geo[prompt_idx] = self._build_point_prompt(
+                    response, B, H, W, device, dtype, topk, max_response, presence_thresh)
+            else:
+                prompt_geo[prompt_idx] = Prompt()
+
+        return prompt_geo
+
+    def _compute_response_map(self, feats_flat, proto_flat, B, H, W, method="cosine"):
+        """Compute response map between spatial features and prototype.
+
+        Args:
+            feats_flat: [B, 256, H*W] spatial features
+            proto_flat: [1, 256] prototype
+            B, H, W: batch, height, width
+            method: correlation method
+
+        Returns:
+            response: [B, H, W] response map
+        """
+        device, dtype = feats_flat.device, feats_flat.dtype
+
+        if method == "cosine":
+            feats_norm = F.normalize(feats_flat, p=2, dim=1)   # [B, 256, H*W]
+            proto_norm = F.normalize(proto_flat, p=2, dim=1)   # [1, 256]
+            response = torch.bmm(proto_norm.unsqueeze(0).expand(B, -1, -1), feats_norm)
+            response = response.view(B, H, W)
+
+        elif method == "dot":
+            # Raw dot product (no normalization, preserves magnitude)
+            response = torch.bmm(proto_flat.unsqueeze(0).expand(B, -1, -1), feats_flat)
+            response = response.view(B, H, W)
+
+        elif method == "euclidean_inv":
+            # Inverse euclidean distance: 1 / (1 + ||f - p||)
+            proto_expanded = proto_flat.unsqueeze(0).expand(B, -1, -1)  # [B, 256, H*W]
+            diff = feats_flat - proto_expanded  # [B, 256, H*W]
+            dist = diff.norm(dim=1)  # [B, H*W]
+            response = (1.0 / (1.0 + dist)).view(B, H, W)
+
+        elif method == "channel_attn":
+            # Channel-wise attention: prototype as channel weights
+            # proto [1, 256] -> weights, apply softmax
+            weights = F.softmax(proto_flat, dim=1)  # [1, 256]
+            # feats [B, 256, H*W] -> weighted sum across channels
+            response = (feats_flat * weights.unsqueeze(0).unsqueeze(-1)).sum(dim=1)
+            response = response.view(B, H, W)
+
+        else:
+            raise ValueError(f"Unknown correlation method: {method}")
+
+        return response
+
+    def _build_box_prompt(self, response, B, H, W, device, dtype, threshold):
+        """Build a box geometric prompt from response map.
+
+        Args:
+            response: [B, H, W] response map
+            B, H, W: dimensions
+            device, dtype: torch device and dtype
+            threshold: binarization threshold
+
+        Returns:
+            Prompt object with box embeddings
+        """
+        from sam3.model.geometry_encoders import Prompt
+
+        binary_mask = (response > threshold).float()  # [B, H, W]
+        boxes_xyxy = self._masks_to_boxes(binary_mask)  # [B, 4]
+
+        valid_mask = (boxes_xyxy[:, 2] > boxes_xyxy[:, 0]) & (boxes_xyxy[:, 3] > boxes_xyxy[:, 1])
+
+        if valid_mask.any():
+            x1, y1, x2, y2 = boxes_xyxy.unbind(dim=1)
+            boxes_cxcywh = torch.stack([
+                ((x1 + x2) / 2) / W,
+                ((y1 + y2) / 2) / H,
+                (x2 - x1) / W,
+                (y2 - y1) / H,
+            ], dim=1).clamp(0, 1)
+            for b in range(B):
+                if not valid_mask[b]:
+                    boxes_cxcywh[b] = torch.tensor([0.5, 0.5, 1.0, 1.0], device=device, dtype=dtype)
+        else:
+            boxes_cxcywh = torch.tensor([[0.5, 0.5, 1.0, 1.0]], device=device, dtype=dtype)
+            boxes_cxcywh = boxes_cxcywh.expand(B, -1)
+
+        return Prompt(
+            box_embeddings=boxes_cxcywh.unsqueeze(0),  # [1, B, 4]
+            box_mask=torch.zeros(B, 1, dtype=torch.bool, device=device),
+            box_labels=torch.ones(1, B, dtype=torch.long, device=device),
+        )
+
+    def _build_point_prompt(self, response, B, H, W, device, dtype, topk,
+                             max_response, presence_thresh):
+        """Build a point geometric prompt from response map (top-K points).
+
+        Args:
+            response: [B, H, W] response map
+            B, H, W: dimensions
+            device, dtype: torch device and dtype
+            topk: number of top points to select
+            max_response: [B] max response per image
+            presence_thresh: minimum response to consider present
+
+        Returns:
+            Prompt object with point embeddings, or empty Prompt if absent.
+        """
+        from sam3.model.geometry_encoders import Prompt
+
+        # Collect valid points per image
+        all_points = []  # list of [N_valid, 2] per image
+        all_labels = []  # list of [N_valid] per image
+        N_points = topk  # fixed number of point slots
+
+        for b in range(B):
+            if max_response[b] < presence_thresh:
+                # Class not present: use dummy points at image center
+                pts = torch.full((N_points, 2), 0.5, device=device, dtype=dtype)
+                all_points.append(pts)
+                all_labels.append(torch.ones(N_points, dtype=torch.long, device=device))
+            else:
+                resp = response[b]  # [H, W]
+                flat = resp.flatten()  # [H*W]
+                topk_vals, topk_idx = flat.topk(min(topk, H * W))
+
+                # Convert flat indices to (y, x) -> normalized (x, y) in [0, 1]
+                y_idx = (topk_idx // W).float() / H
+                x_idx = (topk_idx % W).float() / W
+                pts = torch.stack([x_idx, y_idx], dim=1)  # [topk, 2]
+                pts = pts.clamp(0, 1)
+
+                all_points.append(pts)
+                all_labels.append(torch.ones(pts.shape[0], dtype=torch.long, device=device))
+
+        # Pad to uniform length across batch
+        max_pts = max(p.shape[0] for p in all_points)
+        if max_pts == 0:
+            return Prompt()
+
+        points = torch.zeros(max_pts, B, 2, device=device, dtype=dtype)
+        point_labels = torch.zeros(max_pts, B, dtype=torch.long, device=device)
+        point_mask = torch.ones(B, max_pts, dtype=torch.bool, device=device)
+
+        for b in range(B):
+            n = all_points[b].shape[0]
+            points[:n, b, :] = all_points[b]
+            point_labels[:n, b] = all_labels[b]
+            point_mask[b, :n] = False  # valid = not masked
+
+        return Prompt(
+            point_embeddings=points,
+            point_mask=point_mask,
+            point_labels=point_labels,
+        )

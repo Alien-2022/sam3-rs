@@ -1,0 +1,221 @@
+"""Visual Prototype Bank: extract class-wise visual prototypes from GT crops.
+
+The idea: use SAM3's vision backbone to extract visual features from
+GT-masked regions of calibration images, then average-pool across crops
+per class to get a compact visual prototype per class.
+
+During inference, these prototypes are injected via the `visual_prompt_embed`
+slot in SAM3's _encode_prompt, alongside text tokens.
+"""
+
+import os
+import time
+from typing import Dict, List, Optional
+
+import torch
+import torch.nn.functional as F
+import numpy as np
+from PIL import Image
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+
+class VisualPrototypeBank:
+    """Build and manage per-class visual prototypes from GT calibration data."""
+
+    def __init__(
+        self,
+        processor,
+        device: torch.device,
+        num_classes: int,
+        max_crops_per_class: int = 50,
+    ):
+        self.processor = processor
+        self.device = device
+        self.num_classes = num_classes
+        self.max_crops_per_class = max_crops_per_class
+
+        # Will be filled after build: class_id -> prototype [1, 1, 256]
+        self.prototypes: Dict[int, torch.Tensor] = {}
+        # Store per-crop features for analysis
+        self.crop_features: Dict[int, List[torch.Tensor]] = {}
+
+    def _extract_backbone_features(self, image: Image.Image) -> torch.Tensor:
+        """Extract visual features from an image using SAM3 backbone.
+
+        Returns:
+            features: [1, 256, H_feat, W_feat] - backbone visual features
+        """
+        import torchvision.transforms.v2 as v2
+
+        # Use the same transform as Sam3Processor
+        transform = v2.Compose([
+            v2.ToDtype(torch.uint8, scale=True),
+            v2.Resize(size=(1008, 1008)),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+        ])
+
+        img_tensor = transform(v2.functional.to_image(image).to(self.device)).unsqueeze(0)
+
+        with torch.no_grad(), torch.autocast(
+            device_type=self.device.type, dtype=torch.bfloat16
+        ):
+            backbone_out = self.processor.model.backbone.forward_image(img_tensor)
+
+        return backbone_out["vision_features"]  # [1, 256, H_feat, W_feat]
+
+    def _crop_and_pool(
+        self,
+        features: torch.Tensor,
+        gt_mask: np.ndarray,
+        class_id: int,
+        image_size: tuple,
+    ) -> Optional[torch.Tensor]:
+        """Crop GT region from feature map and pool to a single vector.
+
+        Args:
+            features: [1, C, H_feat, W_feat] backbone features
+            gt_mask: [H_img, W_img] GT mask
+            class_id: class to crop
+            image_size: (H_img, W_img)
+
+        Returns:
+            pooled: [C] feature vector, or None if no pixels
+        """
+        H_img, W_img = image_size
+        H_feat, W_feat = features.shape[-2:]
+
+        # Resize GT mask to feature map size
+        gt_tensor = torch.from_numpy(gt_mask).float().to(features.device).unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+        gt_resized = F.interpolate(gt_tensor, (H_feat, W_feat), mode='nearest').squeeze()  # [H_feat, W_feat]
+
+        # Binary mask for this class
+        class_mask = (gt_resized == class_id).float()
+
+        if class_mask.sum() == 0:
+            return None
+
+        # Masked average pooling: [1, C, H_feat, W_feat] * [1, 1, H_feat, W_feat]
+        masked_feats = features.squeeze(0) * class_mask.unsqueeze(0)  # [C, H_feat, W_feat]
+        num_pixels = class_mask.sum()
+
+        pooled = masked_feats.sum(dim=(1, 2)) / num_pixels  # [C]
+        return pooled
+
+    def build(
+        self,
+        dataset,
+        num_calib: int = 4,
+        save_path: Optional[str] = None,
+    ) -> Dict[int, torch.Tensor]:
+        """Build visual prototype bank from calibration images.
+
+        Args:
+            dataset: dataset with 'image_path' and 'mask' fields
+            num_calib: number of calibration images to use
+            save_path: optional path to save the bank
+
+        Returns:
+            Dict[class_id, prototype] where prototype is [1, 1, 256]
+        """
+        t_start = time.time()
+        print(f"\n{'=' * 60}")
+        print(f"Building Visual Prototype Bank")
+        print(f"  Classes: {self.num_classes}, Calib images: {num_calib}")
+        print(f"{'=' * 60}")
+
+        # Accumulators: class_id -> list of [C] vectors
+        class_features: Dict[int, List[torch.Tensor]] = {
+            c: [] for c in range(self.num_classes)
+        }
+        crop_counts = {c: 0 for c in range(self.num_classes)}
+
+        # Process calibration images
+        loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0)
+        calib_count = 0
+
+        for batch in tqdm(loader, desc="Extracting prototypes"):
+            if calib_count >= num_calib:
+                break
+
+            image_path = batch["image_path"][0]
+            gt_mask = batch["mask"][0].numpy() if torch.is_tensor(batch["mask"]) else np.asarray(batch["mask"])
+            image = Image.open(image_path).convert("RGB")
+
+            print(f"\n  Image {calib_count}: {os.path.basename(image_path)}")
+            print(f"    GT classes present: {np.unique(gt_mask)}")
+
+            # Extract backbone features
+            try:
+                features = self._extract_backbone_features(image)  # [1, C, H_feat, W_feat]
+            except Exception as e:
+                print(f"    Error extracting features: {e}, skipping")
+                calib_count += 1
+                continue
+
+            C = features.shape[1]
+            print(f"    Feature dim: C={C}, spatial={features.shape[-2:]}")
+
+            # Extract per-class prototypes
+            for class_id in range(self.num_classes):
+                if crop_counts[class_id] >= self.max_crops_per_class:
+                    continue
+
+                pooled = self._crop_and_pool(features, gt_mask, class_id, image.size)
+                if pooled is not None:
+                    class_features[class_id].append(pooled.float().cpu())
+                    crop_counts[class_id] += 1
+
+            calib_count += 1
+
+        # Average pool across crops per class
+        print(f"\n  Prototype extraction done in {time.time() - t_start:.1f}s")
+        print(f"  Crop counts: {crop_counts}")
+
+        prototypes = {}
+        for class_id in range(self.num_classes):
+            feats = class_features[class_id]
+            if feats:
+                # Stack and average: [N, C] -> [C]
+                stacked = torch.stack(feats)  # [N, C]
+                proto = stacked.mean(dim=0)  # [C]
+                # Reshape to [1, 1, 256] for visual_prompt_embed
+                proto = proto.unsqueeze(0).unsqueeze(0)  # [1, 1, 256]
+                prototypes[class_id] = proto.to(self.device)
+                self.crop_features[class_id] = feats
+                print(f"  Class {class_id}: {len(feats)} crops, proto shape={proto.shape}")
+            else:
+                print(f"  Class {class_id}: WARNING - no crops found!")
+
+        self.prototypes = prototypes
+        print(f"\n  Built {len(prototypes)}/{self.num_classes} class prototypes")
+
+        if save_path:
+            self.save(save_path)
+
+        return prototypes
+
+    def save(self, save_path: str):
+        """Save prototype bank to disk."""
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        save_dict = {
+            "prototypes": {
+                str(k): v.cpu() for k, v in self.prototypes.items()
+            },
+            "num_classes": self.num_classes,
+            "config": {
+                "max_crops_per_class": self.max_crops_per_class,
+            },
+        }
+        torch.save(save_dict, save_path)
+        print(f"Visual Prototype Bank saved to {save_path}")
+
+    @staticmethod
+    def load(save_path: str, device: torch.device) -> Dict[int, torch.Tensor]:
+        """Load prototype bank from disk."""
+        data = torch.load(save_path, map_location="cpu", weights_only=False)
+        prototypes = {}
+        for k, v in data["prototypes"].items():
+            prototypes[int(k)] = v.to(device)
+        return prototypes
