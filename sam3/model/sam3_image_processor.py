@@ -267,7 +267,7 @@ class Sam3Processor:
         return state
 
     @torch.inference_mode()
-    def _forward_grounding(self, state: Dict):
+    def _forward_grounding(self, state: Dict, encode_text=True):
 
         # Perform grounding forward pass to generate predictions
         # Inputs:
@@ -275,6 +275,7 @@ class Sam3Processor:
         #   - find_input: Current processing stage
         #   - geometric_prompt: User-provided geometric prompts (boxes/points/masks)
         #   - find_target: Used for supervised training, not used in inference
+        #   - encode_text: Whether to include text features in prompt encoding (default True)
         # Outputs will contain:
         #   - pred_boxes: Predicted bounding boxes in cxcywh format
         #   - pred_logits: Classification logits
@@ -285,6 +286,7 @@ class Sam3Processor:
             find_input=self.find_stage,
             geometric_prompt=state["geometric_prompt"],
             find_target=None,
+            encode_text=encode_text,
         )
 
         out_bbox = outputs["pred_boxes"]

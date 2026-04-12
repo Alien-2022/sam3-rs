@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from PIL import Image
 from typing import List, Dict, Optional, Tuple
 import numpy as np
+from scipy import ndimage
 from .debug import MemoryDebugger
 
 
@@ -29,6 +30,17 @@ class InferenceEngine:
         self.device = device
         self.num_classes = max(prompts["indices"]) + 1 if prompts else 0
         self.num_prompts = len(prompts["names"]) if prompts else 0
+
+        # Visual prototype bank (set via set_visual_prototype_bank, None by default)
+        self.visual_prototype_bank = None
+        self.prototype_inject_mode = None
+        self._inter_class_sim = None
+        self._geo_only_classes = None
+        self._geo_only_mode = False
+        self._current_geo_only_rerun = False  # True when current pass is a geo-only rerun
+        self._dinov3_resp_maps = {}  # per-prompt_idx response maps for resp_fusion
+        self.geo_resp_fusion_alpha = 0.0
+        self.geo_resp_fusion_thresh = 0.5
 
         # Initialize memory debugger
         self.memory_debugger = MemoryDebugger(
@@ -126,10 +138,20 @@ class InferenceEngine:
                 "mode": "single_view"
             })
 
-            # Pre-compute per-class geometric prompts from visual prototypes (geo_box mode)
+            # Pre-compute per-class geometric prompts from visual prototypes
             inject_mode = getattr(self, 'prototype_inject_mode', 'lang')
             proto_geo_prompts = None
-            if inject_mode == "geo_box" and self.visual_prototype_bank is not None:
+            dinov3_max_responses = {}
+            dinov3_geo_prompts_full = None  # full geo prompts for two-pass rerun
+            use_two_pass = (inject_mode == "dinov3_geo_point"
+                            and self.visual_prototype_bank is not None
+                            and self.geo_presence_sam3_thresh > 0)
+            if inject_mode == "dinov3_geo_point" and self.visual_prototype_bank is not None:
+                dinov3_geo_prompts_full, dinov3_max_responses = self._compute_dinov3_geo_prompts(image, batch_size=1)
+                if not use_two_pass:
+                    proto_geo_prompts = dinov3_geo_prompts_full
+                # else: two-pass mode, proto_geo_prompts stays None, will inject conditionally
+            elif inject_mode in ("geo_box", "geo_point") and self.visual_prototype_bank is not None:
                 backbone_out_preview = inference_state["backbone_out"]
                 proto_geo_prompts = self._compute_proto_geo_prompts(backbone_out_preview, batch_size=1)
 
@@ -149,15 +171,32 @@ class InferenceEngine:
                 # Get class_id for this prompt
                 class_id = self.prompts["indices"][prompt_idx]
 
-                # Set geometric_prompt: use proto-based box prompt or dummy
-                if proto_geo_prompts is not None and prompt_idx in proto_geo_prompts:
+                # Two-pass mode for dinov3_geo_point:
+                # Pass 1: always run text-only first (never skip preemptively)
+                # Pass 2 (geo_only_mode=False): presence < sam3_thresh + dinov3 confident → text + geo point
+                # Pass 2 (geo_only_mode=True):  presence < sam3_thresh + dinov3 confident → geo point ONLY (no text)
+                # No-skip fallback:              presence < sam3_thresh + dinov3 not confident → keep pass 1 result
+                need_geo_rerun = False
+                if use_two_pass and prompt_idx in dinov3_max_responses:
+                    dinov3_resp = dinov3_max_responses[prompt_idx]
+                    if dinov3_resp >= self.geo_presence_threshold:
+                        # This class has high DINOv3 confidence → candidate for enhancement
+                        # but only if SAM3 is uncertain (will check after pass 1)
+                        need_geo_rerun = True
+
+                # Set geometric_prompt: dummy for pass 1, geo prompt for pass 2 / normal mode
+                if not need_geo_rerun and proto_geo_prompts is not None and prompt_idx in proto_geo_prompts:
                     inference_state["geometric_prompt"] = proto_geo_prompts[prompt_idx]
-                elif "geometric_prompt" not in inference_state:
+                else:
                     inference_state["geometric_prompt"] = self.processor.model._get_dummy_prompt()
 
                 # Inject visual prototype into vision features if in vision mode
                 if inject_mode == "vision":
                     self._inject_proto_to_vision(backbone_out, class_id)
+
+                # Apply pixel-level spatial attention on backbone_fpn[0]
+                if inject_mode == "pixel_attn":
+                    self._apply_pixel_attention(backbone_out, class_id)
 
                 output = None
                 # Use pre-computed text features if available, otherwise real-time encoding
@@ -207,6 +246,47 @@ class InferenceEngine:
                         state=inference_state, prompt=prompt_word
                     )
                     self.memory_debugger.log_cuda_memory(f"  [After set_text_prompt] real-time encoding")
+
+                # Two-pass re-run: check presence score and conditionally re-run with geo points
+                if need_geo_rerun and output is not None:
+                    sam3_presence = output.get("presence_score", 1.0)
+                    if sam3_presence < self.geo_presence_sam3_thresh:
+                        # SAM3 uncertain + DINOv3 confident → re-run
+                        if dinov3_geo_prompts_full is not None and prompt_idx in dinov3_geo_prompts_full:
+                            self.memory_debugger.debug_print(
+                                f"  [Two-pass] Rerunning: "
+                                f"sam3_presence={sam3_presence:.3f} < {self.geo_presence_sam3_thresh}, "
+                                f"dinov3_resp={dinov3_max_responses[prompt_idx]:.3f}, "
+                                f"geo_only={self._geo_only_mode}")
+                            self.processor.reset_all_prompts(inference_state)
+                            inference_state["geometric_prompt"] = dinov3_geo_prompts_full[prompt_idx]
+
+                            if self._geo_only_mode:
+                                # Geo-only mode: skip text features, use only point prompt
+                                self._current_geo_only_rerun = True
+                                output = self.processor._forward_grounding(
+                                    inference_state, encode_text=False)
+                            else:
+                                # Normal two-pass: text + geo point
+                                if self.text_features_cache is not None and prompt_idx in self.text_features_cache:
+                                    cached_features = self.text_features_cache[prompt_idx]
+                                    backbone_out.update({
+                                        "language_features": cached_features["language_features"],
+                                        "language_mask": cached_features["language_mask"],
+                                        "language_embeds": cached_features.get("language_embeds"),
+                                    })
+                                    output = self.processor._forward_grounding(inference_state)
+                                else:
+                                    output = self.processor.set_text_prompt(
+                                        state=inference_state, prompt=prompt_word)
+                    else:
+                        need_geo_rerun = False  # SAM3 confident, no need to rerun
+                elif self._geo_only_mode and use_two_pass:
+                    # DINOv3 not confident → fall back to pass 1 text-only result (never skip)
+                    dinov3_resp = dinov3_max_responses.get(prompt_idx, 0.0)
+                    self.memory_debugger.debug_print(
+                        f"  [Fallback] DINOv3 not confident (resp={dinov3_resp:.3f}), "
+                        f"keeping pass 1 text-only result")
 
                 # Clean up output intermediate tensors to save memory
                 # Only keep what we need, but preserve semantic_seg if using semantic head
@@ -287,8 +367,58 @@ class InferenceEngine:
 
                 # 2. Semantic head
                 if self.config.use_semantic_head:
-                    # semantic_logits: [1, 1, H_orig, W_orig] (4D tensor)
+                    # semantic_logits: [1, 1, H_orig, W_orig] (4D tensor, H_orig=288 for 1008 input)
                     semantic_logits = output["semantic_seg"]
+
+                    # Apply presence score FIRST, before resp injection.
+                    # presence_score reflects SAM3's own confidence — should NOT scale the
+                    # DINOv3 response map which is from an independent model.
+                    # Order: (sem × presence_score) + resp, NOT (sem + resp) × presence_score
+                    if self.config.use_presence_score and self.config.presence_score_mode == "before_fusion":
+                        if self._current_geo_only_rerun:
+                            dinov3_weight = dinov3_max_responses.get(prompt_idx, 0.0)
+                            semantic_logits = semantic_logits * dinov3_weight
+                        else:
+                            presence_score = output.get("presence_score", 0)
+                            semantic_logits = semantic_logits * presence_score
+
+                    # ===== DINOv3 Response Map Fusion (at decoder native resolution) =====
+                    # Inject response map at the semantic head's native resolution (e.g., 288×288)
+                    # instead of after upsampling to (h, w). This reduces upsampling from 128→2048
+                    # to 128→288 (2.25x), letting SAM3's own interpolation handle the final upscale.
+                    if self.geo_resp_fusion_alpha > 0 and prompt_idx in self._dinov3_resp_maps:
+                        resp_np = self._dinov3_resp_maps[prompt_idx]  # [128, 128]
+                        if self._geo_only_classes is None or class_id in self._geo_only_classes:
+                            H_sem, W_sem = semantic_logits.shape[2], semantic_logits.shape[3]
+                            # Normalize response to [0, 1]
+                            rmin, rmax = resp_np.min(), resp_np.max()
+                            if rmax - rmin > 1e-8:
+                                resp_norm = (resp_np - rmin) / (rmax - rmin)
+                            else:
+                                resp_norm = np.zeros_like(resp_np)
+                            resp_tensor = torch.as_tensor(
+                                resp_norm, device=self.device, dtype=torch.float32
+                            )
+                            # Upsample 128 → H_sem (e.g., 128→288, nearest to preserve sharpness)
+                            resp_up = F.interpolate(
+                                resp_tensor.unsqueeze(0).unsqueeze(0),
+                                size=(H_sem, W_sem), mode="nearest"
+                            ).squeeze(0).squeeze(0)  # [H_sem, W_sem]
+                            # Scale to match semantic_logits magnitude (after presence_score scaling)
+                            sem_abs_max = semantic_logits.abs().max()
+                            if sem_abs_max > 1e-8:
+                                scale = sem_abs_max / (resp_up.abs().max() + 1e-8)
+                            else:
+                                scale = 1.0
+                            resp_up = resp_up * scale
+                            # Threshold: only boost high-confidence response pixels
+                            resp_thresh = scale * self.geo_resp_fusion_thresh
+                            resp_mask = (resp_up >= resp_thresh).float()
+                            # Add to semantic logits at native resolution
+                            alpha = self.geo_resp_fusion_alpha
+                            semantic_logits = semantic_logits + alpha * resp_up.unsqueeze(0).unsqueeze(0) * resp_mask.unsqueeze(0).unsqueeze(0)
+
+                    # Now interpolate to (h, w) — SAM3's own interpolation handles final upscale
                     semantic_logits = F.interpolate(
                         semantic_logits,
                         size=(h, w),
@@ -301,19 +431,19 @@ class InferenceEngine:
                         sem_thresh = self.config.semantic_prob_thresholds[class_id]
                         semantic_logits = semantic_logits * (semantic_logits >= sem_thresh).float()
 
-                    # Apply presence score to semantic head if enabled
-                    if self.config.use_presence_score and self.config.presence_score_mode == "before_fusion":
-                        presence_score = output.get("presence_score", 0)
-                        semantic_logits = semantic_logits * presence_score
-
                     # Fusion: take max of instance and semantic predictions
                     current_logits = torch.max(current_logits, semantic_logits)
                     semantic_logits_only[prompt_idx] = semantic_logits
 
                 # 3. Presence score filtering (after fusion mode)
                 if self.config.use_presence_score and self.config.presence_score_mode == "after_fusion":
-                    presence_score = output.get("presence_score", 0)
-                    current_logits = current_logits * presence_score
+                    if self._current_geo_only_rerun:
+                        # Geo-only rerun: use DINOv3 response as weight
+                        dinov3_weight = dinov3_max_responses.get(prompt_idx, 0.0)
+                        current_logits = current_logits * dinov3_weight
+                    else:
+                        presence_score = output.get("presence_score", 0)
+                        current_logits = current_logits * presence_score
 
                 seg_logits[prompt_idx] = current_logits
 
@@ -328,6 +458,7 @@ class InferenceEngine:
                 if self.config.use_semantic_head:
                     del semantic_logits
                 del current_logits
+                self._current_geo_only_rerun = False
 
                 self.memory_debugger.log_cuda_memory(f"  [After deleting intermediate vars]")
 
@@ -413,10 +544,33 @@ class InferenceEngine:
                 num_prompts=batch_size
             )
 
-            # Pre-compute per-class geometric prompts from visual prototypes (geo_box mode)
+            # Pre-compute per-class geometric prompts from visual prototypes
             inject_mode = getattr(self, 'prototype_inject_mode', 'lang')
             proto_geo_prompts = None
-            if inject_mode == "geo_box" and self.visual_prototype_bank is not None:
+            if inject_mode == "dinov3_geo_point" and self.visual_prototype_bank is not None:
+                # DINOv3: batch extract features, then per-image geo prompts, merge into batch
+                precomputed = self._extract_dinov3_features_batch(images)
+                # Collect per-image prompts first
+                per_image_prompts = []  # list of dict or None
+                for b in range(batch_size):
+                    per_img, _ = self._compute_dinov3_geo_prompts(
+                        images[b], batch_size=1, spatial_feats=precomputed[b])
+                    per_image_prompts.append(per_img)
+                # Merge into batch prompts
+                merged = {}
+                for b in range(batch_size):
+                    if per_image_prompts[b] is None:
+                        continue
+                    for pidx, prompt in per_image_prompts[b].items():
+                        if pidx not in merged:
+                            merged[pidx] = [None] * batch_size
+                        merged[pidx][b] = prompt
+                # Build batch Prompts from collected single-image prompts
+                batch_merged = {}
+                for pidx, prompt_list in merged.items():
+                    batch_merged[pidx] = self._build_batch_prompt(prompt_list, batch_size)
+                proto_geo_prompts = batch_merged if batch_merged else None
+            elif inject_mode in ("geo_box", "geo_point") and self.visual_prototype_bank is not None:
                 proto_geo_prompts = self._compute_proto_geo_prompts(backbone_out, batch_size)
 
             # 3. Loop through each Prompt (Decoder / Grounding)
@@ -433,6 +587,10 @@ class InferenceEngine:
                 # Inject visual prototype into vision features if in vision mode
                 if inject_mode == "vision":
                     self._inject_proto_to_vision(backbone_out, class_id)
+
+                # Apply pixel-level spatial attention on backbone_fpn[0]
+                if inject_mode == "pixel_attn":
+                    self._apply_pixel_attention(backbone_out, class_id)
 
                 if self.text_features_cache is not None and prompt_idx in self.text_features_cache:
                     cached_features = self.text_features_cache[prompt_idx]
@@ -649,26 +807,43 @@ class InferenceEngine:
         """Set the pre-computed text features cache."""
         self.text_features_cache = cache
 
-    def set_visual_prototype_bank(self, prototypes: Optional[Dict[int, torch.Tensor]],
-                                   alpha: float = 1.0, mode: str = "lang",
+    def set_visual_prototype_bank(self, prototypes: Optional[Dict],
+                                   mode: str = "geo_point",
                                    geo_threshold: float = 0.3, geo_topk: int = 10,
                                    geo_correlation: str = "cosine",
                                    geo_presence_threshold: float = 0.0,
-                                   geo_fpn_level: int = -1):
+                                   geo_fpn_level: int = -1,
+                                   geo_fusion: str = "mean",
+                                   geo_skip_bg_idx: Optional[int] = None,
+                                   pixel_attn_alpha: float = 10.0,
+                                   pixel_attn_threshold: float = 0.3,
+                               geo_point_mode: str = "centroid",
+                               geo_centroid_thresh_ratio: float = 0.7,
+                               geo_centroid_method: str = "peak",
+                               geo_centroid_min_area: int = 4,
+                               geo_topk_suppress_r: int = 0,
+                               geo_centroid_area_beta: float = 0.0,
+                               dinov3_weights: Optional[str] = None,
+                                   dinov3_input_size: int = 1008,
+                                   geo_presence_sam3_thresh: float = 0.0,
+                                   geo_resp_fusion_alpha: float = 0.0,
+                                   geo_resp_fusion_thresh: float = 0.5,
+                                   dinov3_layers: Optional[list] = None,
+                                   geo_competition: str = "none",
+                                   inter_class_sim: Optional[dict] = None,
+                                   geo_only_classes: Optional[list] = None,
+                                   geo_only_mode: bool = False):
         """Set the visual prototype bank for class-conditional visual guidance.
 
         Args:
-            prototypes: Dict mapping class_id -> prototype tensor [1, 1, 256] (L2-normalized).
-            alpha: Injection strength. Default 1.0.
+            prototypes: Dict mapping class_id -> prototype tensor [1, 1, 256] (single-level)
+                        or class_id -> {level: [1, 1, 256]} (multi-level).
             mode: Injection mode.
-                - "lang": add to language_features (text encoder space, cross-space addition)
-                - "concat": append prototype as an extra token to language_features
-                - "replace_last": replace last token with scaled prototype
-                - "vision": add to backbone_fpn[-1] (vision backbone space)
-                - "geo_box": bounding boxes from response maps → geometric prompts
-                - "geo_point": top-K points from response maps → geometric prompts
+                - "geo_box": bounding boxes from response maps -> geometric prompts
+                - "geo_point": points from response maps -> geometric prompts (default)
+                - "pixel_attn": spatial attention on backbone_fpn[0] (288x288) before PixelDecoder
             geo_threshold: threshold for response map binarization (box mode only).
-            geo_topk: number of top-K points to select as point prompts (point mode only).
+            geo_topk: number of points to select as point prompts (point mode only).
             geo_correlation: correlation method for response map computation.
                 - "cosine": cosine similarity (default)
                 - "dot": raw dot product (preserves magnitude)
@@ -676,18 +851,110 @@ class InferenceEngine:
                 - "channel_attn": channel-wise attention weighting
             geo_presence_threshold: minimum max-response value to add geo prompt.
                 0.0 = always add (default). Set higher to filter absent classes.
-            geo_fpn_level: which FPN level to compute response map on.
+            geo_fpn_level: which FPN level to compute response map on (single-level).
                 -1 = 72x72 (default, matches encoder), -2 = 144x144, -3 = 288x288.
                 Points/boxes are always normalized to [0,1] so any level works.
+            geo_fusion: multi-level fusion method. "mean" (response-level average).
+            geo_skip_bg_idx: if set, skip geo prompt injection for this class_id
+                (typically background, e.g. 0 for Potsdam). Background is vague,
+                so geo points/boxes may introduce noise. Only text prompt is used.
+            pixel_attn_alpha: sharpness of sigmoid for pixel_attn mode (default: 10.0).
+                Higher = sharper transition, lower = softer attention.
+            pixel_attn_threshold: center of sigmoid for pixel_attn mode (default: 0.3).
+                Response values above this get amplified, below get suppressed.
+            geo_point_mode: point selection strategy for geo_point mode.
+                - "centroid": threshold response map, find connected components,
+                  compute weighted centroid per component (default, more robust for
+                  continuous/spatially distributed features).
+                - "topk": select global top-K highest response locations (original).
+            geo_centroid_thresh_ratio: fraction of (min+max) range to use as threshold
+                for centroid mode (default: 0.7). Higher = stricter threshold = fewer
+                but more confident regions.
+            dinov3_weights: path to DINOv3 SAT model directory (for dinov3_geo_point mode).
+            dinov3_input_size: input resolution for DINOv3 (default: 1008 -> 63x63 patches).
+            geo_competition: class competition mode for response maps (dinov3_geo_point only).
+                - "none": no competition, use raw response maps (default)
+                - "mean": subtract mean of other classes' response maps
+                - "max": subtract max of other classes' response maps
+                - "weighted": subtract weighted mean using inter-class prototype similarity
+                Helps suppress regions where multiple similar classes have high responses.
+            inter_class_sim: pre-computed inter-class cosine similarity matrix from bank file.
+                Dict[class_id -> {other_id: similarity}]. If provided, used directly in
+                weighted competition mode without recomputation.
+            geo_only_classes: if set, only inject geo prompts for these class IDs (list of ints).
+                Other classes get text-only prompts. Useful for diagnostic per-class analysis.
+                None = inject for all classes (default).
         """
+        # Detect multi-level format
+        self.proto_multi_level = (
+            bool(prototypes) and isinstance(next(iter(prototypes.values())), dict)
+        )
+        if self.proto_multi_level:
+            self.proto_levels = sorted(
+                set().union(*(v.keys() for v in prototypes.values()))
+            )
+            print(f"  [core] Multi-level prototype bank: levels={self.proto_levels}, "
+                  f"fusion={geo_fusion}")
+        else:
+            self.proto_levels = None
         self.visual_prototype_bank = prototypes
-        self.prototype_alpha = alpha
         self.prototype_inject_mode = mode
         self.geo_box_threshold = geo_threshold
         self.geo_topk = geo_topk
         self.geo_correlation = geo_correlation
         self.geo_presence_threshold = geo_presence_threshold
         self.geo_fpn_level = geo_fpn_level
+        self.geo_fusion = geo_fusion
+        self.geo_skip_bg_idx = geo_skip_bg_idx
+        self.pixel_attn_alpha = pixel_attn_alpha
+        self.pixel_attn_threshold = pixel_attn_threshold
+        self.geo_point_mode = geo_point_mode
+        self.geo_centroid_thresh_ratio = geo_centroid_thresh_ratio
+        self.geo_centroid_method = geo_centroid_method
+        self.geo_centroid_min_area = geo_centroid_min_area
+        self.geo_topk_suppress_r = geo_topk_suppress_r
+        self.geo_centroid_area_beta = geo_centroid_area_beta
+        self.dinov3_input_size = dinov3_input_size
+        self.geo_presence_sam3_thresh = geo_presence_sam3_thresh
+        self.geo_competition = geo_competition
+        self._inter_class_sim = inter_class_sim
+        self._geo_only_classes = set(geo_only_classes) if geo_only_classes else None
+        self._geo_only_mode = geo_only_mode
+        self.geo_resp_fusion_alpha = geo_resp_fusion_alpha
+        self.geo_resp_fusion_thresh = geo_resp_fusion_thresh
+
+        # Load DINOv3 model if needed
+        self._dinov3_model = None
+        self._dinov3_n_reg = 0
+        self._dinov3_transform = None
+        self._dinov3_layers = dinov3_layers  # list of layer indices, None = last layer only
+        if mode == "dinov3_geo_point":
+            if dinov3_weights is None:
+                raise ValueError("dinov3_weights is required for dinov3_geo_point mode")
+            self._load_dinov3_model(dinov3_weights)
+            layers_info = f", layers={dinov3_layers}" if dinov3_layers else ""
+            print(f"  [core] DINOv3 model loaded for dinov3_geo_point mode, "
+                  f"input_size={dinov3_input_size}{layers_info}")
+
+    def _load_dinov3_model(self, weights_path):
+        """Load DINOv3 ViT-L/16 SAT model for feature extraction."""
+        from transformers import AutoModel
+        import torchvision.transforms.v2 as v2
+        print(f"  [core] Loading DINOv3 from {weights_path} ...")
+        self._dinov3_model = AutoModel.from_pretrained(weights_path, local_files_only=True)
+        self._dinov3_model = self._dinov3_model.to(self.device).eval()
+        cfg = self._dinov3_model.config
+        self._dinov3_n_reg = getattr(cfg, "num_register_tokens", 0)
+        self._dinov3_patch_size = cfg.patch_size
+        print(f"  [core] DINOv3: hidden_size={cfg.hidden_size}, patch_size={cfg.patch_size}, "
+              f"register_tokens={self._dinov3_n_reg}")
+        # DINOv3 SAT normalization
+        self._dinov3_transform = v2.Compose([
+            v2.ToImage(),
+            v2.Resize(size=(self.dinov3_input_size, self.dinov3_input_size), antialias=True),
+            v2.ToDtype(torch.float32, scale=True),
+            v2.Normalize(mean=[0.430, 0.411, 0.296], std=[0.213, 0.156, 0.143]),
+        ])
 
     def _inject_proto_as_token(self, cached_features: dict, class_id: int) -> dict:
         """Append visual prototype as an extra token to language_features.
@@ -805,6 +1072,78 @@ class InferenceEngine:
         fpn_new[-1] = feat + scaled_proto  # [B, 256, H, W]
         backbone_out["backbone_fpn"] = fpn_new
 
+    def _apply_pixel_attention(self, backbone_out: dict, class_id: int):
+        """Apply spatial attention on backbone_fpn[0] (288x288) using visual prototype.
+
+        Computes cosine similarity between Level-2 prototype and Level-2 features
+        (72x72, has semantic discrimination) to get a spatial response map, then
+        upsamples to 288x288 and applies sigmoid attention on backbone_fpn[0].
+
+        This combines Level-2's semantic discrimination with Level-0's high resolution.
+
+        The attention is applied to backbone_fpn[0] BEFORE it enters PixelDecoder,
+        so both pred_masks and semantic_seg are affected through the fused pixel_embed.
+
+        Args:
+            backbone_out: Dict containing "backbone_fpn" list of FPN features.
+            class_id: class ID to compute attention for.
+        """
+        if self.visual_prototype_bank is None or class_id not in self.visual_prototype_bank:
+            return
+        if "backbone_fpn" not in backbone_out:
+            return
+
+        fpn = backbone_out["backbone_fpn"]
+        if not isinstance(fpn, list) or len(fpn) < 3:
+            return
+
+        # Get Level-2 prototype (handle both single-level and multi-level formats)
+        proto_data = self.visual_prototype_bank[class_id]
+        if isinstance(proto_data, dict):
+            # Multi-level: use level 2 (72x72, semantic) for discrimination
+            proto = proto_data.get(2, next(iter(proto_data.values())))
+        else:
+            proto = proto_data  # [1, 1, 256], L2-norm=1
+
+        # Compute response map on Level 2 (72x72) for semantic discrimination
+        feat_sem = fpn[-1]  # [B, 256, Hs, Ws] where Hs=Ws=72
+        B, C, Hs, Ws = feat_sem.shape
+        device = feat_sem.device
+        dtype = feat_sem.dtype
+
+        proto = proto.to(device, dtype=dtype)
+        proto_flat = proto.flatten(1)  # [1, 256]
+        feats_flat = feat_sem.flatten(2)  # [B, 256, Hs*Ws]
+
+        # Cosine similarity response map at semantic resolution
+        feats_norm = F.normalize(feats_flat, p=2, dim=1)
+        proto_norm = F.normalize(proto_flat, p=2, dim=1)
+        response = torch.bmm(
+            proto_norm.unsqueeze(0).expand(B, -1, -1), feats_norm
+        )  # [B, 1, Hs*Ws]
+        response = response.view(B, 1, Hs, Ws)  # [B, 1, 72, 72]
+
+        # Upsample response map to Level 0 resolution (288x288)
+        H0, W0 = fpn[0].shape[2], fpn[0].shape[3]
+        response_up = F.interpolate(
+            response, size=(H0, W0), mode='bilinear', align_corners=False
+        )  # [B, 1, 288, 288]
+        response_up = response_up.view(B, H0, W0)
+
+        # Sigmoid spatial attention: sigmoid(alpha * (response - threshold))
+        alpha = self.pixel_attn_alpha
+        threshold = self.pixel_attn_threshold
+        attention = torch.sigmoid(alpha * (response_up - threshold))  # [B, H0, W0]
+
+        # Apply attention to backbone_fpn[0]
+        attention_map = attention.unsqueeze(1)  # [B, 1, H0, W0]
+        feat_hr = fpn[0]  # [B, 256, H0, W0]
+
+        # Deep copy the FPN list to avoid modifying cached features
+        fpn_new = list(fpn)
+        fpn_new[0] = feat_hr * attention_map  # [B, 256, H0, W0]
+        backbone_out["backbone_fpn"] = fpn_new
+
     def _masks_to_boxes(self, masks: torch.Tensor) -> torch.Tensor:
         """Convert binary masks to bounding boxes.
 
@@ -849,17 +1188,343 @@ class InferenceEngine:
 
         return boxes
 
-    def _compute_proto_geo_prompts(self, backbone_out: dict, batch_size: int):
-        """Compute per-class geometric (box) prompts from visual prototype response maps.
+    def _extract_dinov3_features_batch(self, images):
+        """Extract DINOv3 patch tokens from a batch of PIL images.
 
-        For each class with a visual prototype:
-        1. Select FPN level and extract features
-        2. Compute response map between spatial features and prototype
-        3. Presence filtering: skip classes with max-response below threshold
-        4. Extract geometric prompts:
-           - "geo_box": threshold → binary mask → bounding box
-           - "geo_point": top-K highest response points
-        5. Return Prompt objects per prompt_idx
+        Returns:
+            list of (spatial_feats [1, 1024*len(layers), H, W], patch_res) tuples
+        """
+        layers = self._dinov3_layers
+        if layers is None:
+            layers = [self._dinov3_model.config.num_hidden_layers]
+
+        img_tensors = torch.stack([self._dinov3_transform(img) for img in images]).to(self.device)
+        with torch.no_grad(), torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+            outputs = self._dinov3_model(img_tensors, output_hidden_states=True)
+
+        n_skip = 1 + self._dinov3_n_reg
+        patch_res = self.dinov3_input_size // self._dinov3_patch_size
+        last_layer_idx = self._dinov3_model.config.num_hidden_layers
+
+        results = []
+        for b in range(len(images)):
+            patch_feat_list = []
+            for layer_idx in layers:
+                if layer_idx == last_layer_idx:
+                    layer_tokens = outputs.last_hidden_state[b:b+1]  # [1, N, C]
+                else:
+                    layer_tokens = outputs.hidden_states[layer_idx][b:b+1]
+                p_tokens = layer_tokens[:, n_skip:, :]
+                N, C = p_tokens.shape[1], p_tokens.shape[2]
+                assert N == patch_res * patch_res
+                spatial = p_tokens.reshape(1, patch_res, patch_res, C).permute(0, 3, 1, 2).float()
+                patch_feat_list.append(spatial)
+            spatial_feats = torch.cat(patch_feat_list, dim=1)
+            results.append((spatial_feats, patch_res))
+        return results
+
+    def _extract_dinov3_features(self, image):
+        """Extract DINOv3 patch tokens from a PIL image.
+
+        Supports multi-layer fusion: concatenates patch tokens from specified layers.
+
+        Returns:
+            spatial_feats: [1, 1024*len(layers), patch_res, patch_res] float32
+            patch_res: int
+        """
+        layers = self._dinov3_layers
+        if layers is None:
+            layers = [self._dinov3_model.config.num_hidden_layers]  # hidden_states has [0..24] for 24-layer model
+
+        img_tensor = self._dinov3_transform(image).unsqueeze(0).to(self.device)
+        with torch.no_grad(), torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+            outputs = self._dinov3_model(img_tensor, output_hidden_states=True)
+
+        n_skip = 1 + self._dinov3_n_reg
+        patch_res = self.dinov3_input_size // self._dinov3_patch_size
+
+        last_layer_idx = self._dinov3_model.config.num_hidden_layers
+        patch_feat_list = []
+        for layer_idx in layers:
+            if layer_idx == last_layer_idx:
+                layer_tokens = outputs.last_hidden_state  # includes final LayerNorm
+            else:
+                layer_tokens = outputs.hidden_states[layer_idx]  # raw, no final LN
+            p_tokens = layer_tokens[:, n_skip:, :]  # [1, H*W, 1024]
+            B, N, C = p_tokens.shape
+            assert N == patch_res * patch_res
+            spatial = p_tokens.reshape(B, patch_res, patch_res, C).permute(0, 3, 1, 2).float()
+            patch_feat_list.append(spatial)
+
+        # Concatenate along channel dim: [1, 1024*len(layers), H, W]
+        spatial_feats = torch.cat(patch_feat_list, dim=1)
+        return spatial_feats, patch_res
+
+    def _compute_dinov3_response_map(self, features, prototype):
+        """Compute cosine similarity response map for DINOv3 features.
+
+        Args:
+            features: [1, 1024, H, W]
+            prototype: [1, 1, 1024]
+
+        Returns:
+            response: [H, W] numpy array
+        """
+        B, C, H, W = features.shape
+        feats_flat = features.flatten(2)  # [1, 1024, H*W]
+        proto_flat = prototype.flatten(1).to(features.device, features.dtype)  # [1, 1024]
+        feats_norm = F.normalize(feats_flat, p=2, dim=1)
+        proto_norm = F.normalize(proto_flat, p=2, dim=1)
+        resp = torch.bmm(proto_norm.unsqueeze(1), feats_norm)  # [1, 1, H*W]
+        return resp.view(H, W).float().cpu().numpy()
+
+    def _compute_dinov3_geo_prompts(self, image, batch_size=1, spatial_feats=None):
+        """Compute per-class geo point prompts using DINOv3 features.
+
+        Independent of SAM3 backbone — uses DINOv3 to extract features and
+        compare with DINOv3 prototypes to generate response maps → geo points.
+
+        Args:
+            image: PIL Image (single image), ignored if spatial_feats is provided
+            batch_size: always 1 for single-view
+            spatial_feats: pre-computed (spatial_feats, patch_res) tuple to skip DINOv3 forward
+
+        Returns:
+            (prompt_geo, max_responses) tuple:
+                prompt_geo: Dict[prompt_idx -> Prompt] or None
+                max_responses: Dict[prompt_idx -> float] (max cosine similarity per class)
+        """
+        from sam3.model.geometry_encoders import Prompt
+
+        if self._dinov3_model is None:
+            return None, {}
+
+        skip_bg = self.geo_skip_bg_idx
+        topk = self.geo_topk
+        presence_thresh = self.geo_presence_threshold
+        point_mode = self.geo_point_mode
+        competition = self.geo_competition
+
+        # Extract DINOv3 features from the inference image
+        if spatial_feats is not None:
+            spatial_feats, patch_res = spatial_feats
+        else:
+            spatial_feats, patch_res = self._extract_dinov3_features(image)
+        # spatial_feats: [1, 1024, patch_res, patch_res]
+        H, W = patch_res, patch_res
+
+        # ---- Phase 1: compute ALL raw response maps ----
+        class_responses = {}  # class_id -> numpy [H, W]
+        class_prompt_ids = {}  # class_id -> list[prompt_idx]
+        for prompt_idx in range(self.num_prompts):
+            class_id = self.prompts["indices"][prompt_idx]
+            if skip_bg is not None and class_id == skip_bg:
+                continue
+            if self._geo_only_classes is not None and class_id not in self._geo_only_classes:
+                continue
+            if class_id not in self.visual_prototype_bank:
+                continue
+            if class_id not in class_responses:  # compute response once per class
+                proto = self.visual_prototype_bank[class_id].to(self.device)
+                if proto.shape[0] > 1:
+                    proto = proto[0:1]
+                response = self._compute_dinov3_response_map(spatial_feats, proto)
+                class_responses[class_id] = response
+            if class_id not in class_prompt_ids:
+                class_prompt_ids[class_id] = []
+            class_prompt_ids[class_id].append(prompt_idx)
+
+        # ---- Phase 2: apply class competition ----
+        if competition in ("mean", "max", "weighted", "exclusive") and len(class_responses) > 1:
+            class_ids = list(class_responses.keys())
+
+            # Pre-compute inter-class prototype cosine similarities for weighted mode
+            if competition == "weighted":
+                sim_matrix = {}
+                # Prefer pre-computed similarity from bank file
+                if self._inter_class_sim is not None:
+                    for cid in class_ids:
+                        sim_matrix[cid] = {
+                            oid: max(v, 0.01)
+                            for oid, v in self._inter_class_sim.get(cid, {}).items()
+                            if oid in class_ids and oid != cid
+                        }
+                else:
+                    proto_vecs = {}
+                    for cid in class_ids:
+                        p = self.visual_prototype_bank[cid].to(self.device)
+                        if p.shape[0] > 1:
+                            p = p[0:1]
+                        proto_vecs[cid] = F.normalize(
+                            p.flatten(1).float(), p=2, dim=1
+                        )  # [1, C]
+                    for cid in class_ids:
+                        sim_matrix[cid] = {}
+                        for oid in class_ids:
+                            if cid == oid:
+                                continue
+                            sim = torch.mm(proto_vecs[cid], proto_vecs[oid].T).item()
+                            sim_matrix[cid][oid] = max(sim, 0.01)
+
+            # Save original responses before competition (avoid in-place contamination)
+            orig_responses = {cid: class_responses[cid].copy() for cid in class_ids}
+
+            for cid in class_ids:
+                if competition == "exclusive":
+                    # exclusive handled below after this loop
+                    continue
+                resp = class_responses[cid]
+                others = np.stack(
+                    [orig_responses[oid] for oid in class_ids if oid != cid], axis=0
+                )  # [N-1, H, W]
+                if competition == "mean":
+                    resp = resp - others.mean(axis=0)
+                elif competition == "max":
+                    resp = resp - others.max(axis=0)
+                else:  # weighted
+                    other_ids = [oid for oid in class_ids if oid != cid]
+                    weights = np.array([sim_matrix[cid][oid] for oid in other_ids])
+                    weights = weights / weights.sum()
+                    resp = resp - np.tensordot(weights, others, axes=([0], [0]))
+                class_responses[cid] = resp
+
+            # Exclusive (winner-take-all): each pixel only keeps the max-class response
+            if competition == "exclusive":
+                cids = list(class_responses.keys())
+                stacked = np.stack([class_responses[cid] for cid in cids], axis=0)  # [N, H, W]
+                winner = np.argmax(stacked, axis=0)  # [H, W]
+                for i, cid in enumerate(cids):
+                    mask = (winner == i)
+                    class_responses[cid] = np.where(mask, class_responses[cid], 0.0)
+
+        # ---- Phase 3: select points from (possibly modified) response maps ----
+        prompt_geo = {}
+        max_responses = {}
+        for class_id, response in class_responses.items():
+            prompt_idx_list = class_prompt_ids[class_id]
+            max_response = response.max()
+            # Store max_response for ALL prompt_idx of this class
+            for pidx in prompt_idx_list:
+                max_responses[pidx] = max_response
+
+            if max_response < presence_thresh:
+                continue
+
+            resp_np = response  # numpy [H, W]
+            if point_mode == "topk":
+                pts = self._select_points_topk(resp_np, H, W, topk)
+            else:
+                pts = self._select_points_centroid(resp_np, H, W, topk)
+
+            if pts.shape[0] == 0:
+                continue
+
+            pts_tensor = torch.as_tensor(pts, device=self.device, dtype=torch.float32)
+            pts_tensor = pts_tensor.clamp(0, 1)
+            n_pts = pts_tensor.shape[0]
+
+            points = pts_tensor.unsqueeze(1)  # [n_pts, 1]
+            point_labels = torch.ones(n_pts, 1, dtype=torch.long, device=self.device)
+            point_mask = torch.zeros(1, n_pts, dtype=torch.bool, device=self.device)
+
+            geo_prompt = Prompt(
+                point_embeddings=points,
+                point_mask=point_mask,
+                point_labels=point_labels,
+            )
+            # Assign the SAME geo prompt to ALL prompt_idx of this class
+            for pidx in prompt_idx_list:
+                prompt_geo[pidx] = geo_prompt
+
+        # Store response maps for resp_fusion (per-class → per-prompt_idx)
+        if self.geo_resp_fusion_alpha > 0:
+            self._dinov3_resp_maps = {}
+            for class_id, response in class_responses.items():
+                for pidx in class_prompt_ids[class_id]:
+                    self._dinov3_resp_maps[pidx] = response.copy()
+        else:
+            self._dinov3_resp_maps = {}
+
+        return (prompt_geo if prompt_geo else None), max_responses
+
+    @staticmethod
+    def _expand_prompt_to_batch(existing: 'Prompt', new_single: 'Prompt', b: int, batch_size: int):
+        """Expand a batch Prompt to include a new single-image Prompt at batch index b."""
+        from sam3.model.geometry_encoders import Prompt
+
+        if existing.point_embeddings is not None and new_single.point_embeddings is not None:
+            n_exist = existing.point_embeddings.shape[0]
+            n_new = new_single.point_embeddings.shape[0]
+            n_max = max(n_exist, n_new)
+            B = batch_size
+            device = existing.point_embeddings.device
+            dtype = existing.point_embeddings.dtype
+
+            pts = torch.zeros(n_max, B, 2, device=device, dtype=dtype)
+            labels = torch.zeros(n_max, B, dtype=torch.long, device=device)
+            mask = torch.ones(B, n_max, dtype=torch.bool, device=device)
+
+            # Copy existing data
+            pts[:n_exist, :, :] = existing.point_embeddings
+            labels[:n_exist, :] = existing.point_labels
+            mask[:, :n_exist] = existing.point_mask
+
+            # Insert new image's data at batch index b
+            pts[:n_new, b, :] = new_single.point_embeddings[:, 0, :]
+            labels[:n_new, b] = new_single.point_labels[:, 0]
+            mask[b, :n_new] = new_single.point_mask[0, :]
+
+            return Prompt(point_embeddings=pts, point_mask=mask, point_labels=labels)
+        return existing
+
+    @staticmethod
+    def _build_batch_prompt(prompt_list: list, batch_size: int):
+        """Build a batch Prompt from a list of single-image Prompts (may contain None).
+
+        Args:
+            prompt_list: list of length batch_size, each element is a Prompt or None
+            batch_size: total batch size
+
+        Returns:
+            A Prompt with batch dimension, where missing images have masked-out points.
+        """
+        from sam3.model.geometry_encoders import Prompt
+
+        # Find max number of points across images
+        n_max = 0
+        device = None
+        dtype = None
+        for p in prompt_list:
+            if p is not None and p.point_embeddings is not None:
+                n_max = max(n_max, p.point_embeddings.shape[0])
+                device = p.point_embeddings.device
+                dtype = p.point_embeddings.dtype
+
+        if n_max == 0 or device is None:
+            return None
+
+        # All-masked batch prompt (no valid points for any image)
+        pts = torch.zeros(n_max, batch_size, 2, device=device, dtype=dtype)
+        labels = torch.zeros(n_max, batch_size, dtype=torch.long, device=device)
+        mask = torch.ones(batch_size, n_max, dtype=torch.bool, device=device)  # True = masked (ignored)
+
+        for b in range(batch_size):
+            p = prompt_list[b]
+            if p is not None and p.point_embeddings is not None and p.point_embeddings.shape[0] > 0:
+                n = p.point_embeddings.shape[0]
+                pts[:n, b, :] = p.point_embeddings[:, 0, :]
+                labels[:n, b] = p.point_labels[:, 0]
+                mask[b, :n] = p.point_mask[0, :]
+
+        return Prompt(point_embeddings=pts, point_mask=mask, point_labels=labels)
+
+    def _compute_proto_geo_prompts(self, backbone_out: dict, batch_size: int):
+        """Compute per-class geometric prompts from visual prototype response maps.
+
+        Supports both single-level and multi-level fusion:
+        - Single-level: compute response at one FPN level, extract prompts.
+        - Multi-level: compute response at each level, upsample to finest resolution,
+          average, then extract prompts from the fused response map.
 
         Args:
             backbone_out: Dict containing backbone features (must have "backbone_fpn")
@@ -878,41 +1543,77 @@ class InferenceEngine:
             return {}
 
         fpn_list = backbone_out["backbone_fpn"]
-        fpn_level = getattr(self, 'geo_fpn_level', -1)
-        fpn_feats = fpn_list[fpn_level]  # [B, 256, H, W]
-        B, C, H, W = fpn_feats.shape
-        device = fpn_feats.device
-        dtype = fpn_feats.dtype
-
-        # Compute spatial features: [B, 256, H*W]
-        feats_flat = fpn_feats.flatten(2)  # [B, 256, H*W]
-
-        geo_mode = getattr(self, 'prototype_inject_mode', 'lang')
+        geo_mode = getattr(self, 'prototype_inject_mode', 'geo_point')
         correlation = getattr(self, 'geo_correlation', 'cosine')
         threshold = getattr(self, 'geo_box_threshold', 0.3)
         topk = getattr(self, 'geo_topk', 10)
         presence_thresh = getattr(self, 'geo_presence_threshold', 0.0)
+        fusion = getattr(self, 'geo_fusion', 'mean')
 
         prompt_geo = {}
 
         for prompt_idx in range(self.num_prompts):
             class_id = self.prompts["indices"][prompt_idx]
 
-            if class_id not in self.visual_prototype_bank:
-                prompt_geo[prompt_idx] = Prompt()  # empty prompt (CLS token only)
+            # Skip background class: geo points/boxes for vague background
+            # may introduce noise; let text-only prompt handle it.
+            skip_bg = getattr(self, 'geo_skip_bg_idx', None)
+            if skip_bg is not None and class_id == skip_bg:
                 continue
 
-            proto = self.visual_prototype_bank[class_id].to(device, dtype=dtype)  # [1, 1, 256]
-            proto_flat = proto.flatten(1)  # [1, 256]
+            if class_id not in self.visual_prototype_bank:
+                continue
 
-            # Compute response map based on correlation method
-            response = self._compute_response_map(feats_flat, proto_flat, B, H, W,
-                                                   method=correlation)  # [B, H, W]
+            if self.proto_multi_level:
+                # Multi-level fusion path
+                response = self._compute_fused_response(
+                    fpn_list, class_id, batch_size, correlation, fusion)
+
+                if response is None:
+                    continue
+
+                B, H, W = response.shape
+                device = response.device
+                dtype = response.dtype
+            else:
+                # Single-level path (original)
+                fpn_level = getattr(self, 'geo_fpn_level', -1)
+                fpn_feats = fpn_list[fpn_level]  # [B, 256, H, W]
+                B, C, H, W = fpn_feats.shape
+                device = fpn_feats.device
+                dtype = fpn_feats.dtype
+
+                feats_flat = fpn_feats.flatten(2)  # [B, 256, H*W]
+                proto = self.visual_prototype_bank[class_id].to(device, dtype=dtype)
+
+                if proto.shape[0] > 1:
+                    # Multi-prototype: extract topk points from EACH sub-prototype
+                    # then merge. Total points = topk * K_subprototypes.
+                    if geo_mode == "geo_point":
+                        result = self._build_multi_proto_point_prompt(
+                            feats_flat, proto, B, H, W, device, dtype,
+                            topk, presence_thresh, method=correlation)
+                        if result is not None:
+                            prompt_geo[prompt_idx] = result
+                        continue
+                    else:
+                        # geo_box: fall back to max-fused response
+                        K = proto.shape[0]
+                        responses = []
+                        for k in range(K):
+                            proto_k = proto[k].flatten(1)
+                            resp_k = self._compute_response_map(
+                                feats_flat, proto_k, B, H, W, method=correlation)
+                            responses.append(resp_k)
+                        response = torch.stack(responses, dim=0).max(dim=0)[0]
+                else:
+                    proto_flat = proto.flatten(1)  # [1, 256]
+                    response = self._compute_response_map(
+                        feats_flat, proto_flat, B, H, W, method=correlation)  # [B, H, W]
 
             # Presence filtering: skip if max response too low
             max_response = response.view(B, -1).max(dim=1)[0]  # [B]
             if (max_response < presence_thresh).all():
-                prompt_geo[prompt_idx] = Prompt()
                 continue
 
             # Build geometric prompt based on mode
@@ -923,9 +1624,73 @@ class InferenceEngine:
                 prompt_geo[prompt_idx] = self._build_point_prompt(
                     response, B, H, W, device, dtype, topk, max_response, presence_thresh)
             else:
-                prompt_geo[prompt_idx] = Prompt()
+                continue
 
         return prompt_geo
+
+    def _compute_fused_response(self, fpn_list, class_id, batch_size, correlation, fusion):
+        """Compute fused multi-level response map for one class.
+
+        For each level, computes response map, upsamples all to finest resolution,
+        then fuses via mean.
+
+        Args:
+            fpn_list: backbone FPN feature list
+            class_id: class to compute response for
+            batch_size: batch size
+            correlation: correlation method
+            fusion: fusion method (currently only "mean")
+
+        Returns:
+            fused response: [B, H_finest, W_finest] or None if no valid levels
+        """
+        proto_dict = self.visual_prototype_bank[class_id]
+
+        responses_list = []
+        for level in self.proto_levels:
+            if level not in proto_dict:
+                continue
+            fpn_feats = fpn_list[level]
+            if fpn_feats is None:
+                continue
+
+            B_lv, C_lv, H_lv, W_lv = fpn_feats.shape
+            device = fpn_feats.device
+            dtype = fpn_feats.dtype
+
+            feats_flat = fpn_feats.flatten(2)  # [B, 256, H*W]
+            proto = proto_dict[level].to(device, dtype=dtype)
+            proto_flat = proto.flatten(1)  # [1, 256]
+
+            resp = self._compute_response_map(
+                feats_flat, proto_flat, B_lv, H_lv, W_lv, method=correlation)  # [B, H, W]
+            responses_list.append(resp)
+
+        if not responses_list:
+            return None
+
+        # Find finest resolution
+        finest_idx = max(range(len(responses_list)),
+                         key=lambda i: max(responses_list[i].shape[1:]))
+        finest_H, finest_W = responses_list[finest_idx].shape[1:]
+
+        # Upsample all to finest resolution and average
+        upsampled = []
+        for resp in responses_list:
+            h, w = resp.shape[1], resp.shape[2]
+            if h != finest_H or w != finest_W:
+                resp_up = F.interpolate(
+                    resp.unsqueeze(1).float(), (finest_H, finest_W),
+                    mode='bilinear', align_corners=False
+                ).to(resp.dtype).squeeze(1)
+                upsampled.append(resp_up)
+            else:
+                upsampled.append(resp)
+
+        stacked = torch.stack(upsampled, dim=0)  # [num_levels, B, H, W]
+        fused = stacked.mean(dim=0)  # [B, H, W]
+
+        return fused
 
     def _compute_response_map(self, feats_flat, proto_flat, B, H, W, method="cosine"):
         """Compute response map between spatial features and prototype.
@@ -1012,15 +1777,95 @@ class InferenceEngine:
             box_labels=torch.ones(1, B, dtype=torch.long, device=device),
         )
 
+    def _build_multi_proto_point_prompt(self, feats_flat, proto, B, H, W,
+                                         device, dtype, topk, presence_thresh,
+                                         method="cosine"):
+        """Build point prompt from multiple sub-prototypes.
+
+        Extracts topk points from EACH sub-prototype's response map independently,
+        then merges. Total points = topk * K_subprototypes.
+
+        Args:
+            feats_flat: [B, 256, H*W]
+            proto: [K, 1, 256] sub-prototypes
+            B, H, W: spatial dimensions
+            device, dtype: torch device and dtype
+            topk: points per sub-prototype
+            presence_thresh: min response to consider present
+            method: correlation method
+
+        Returns:
+            Prompt object with combined points from all sub-prototypes.
+        """
+        from sam3.model.geometry_encoders import Prompt
+
+        K = proto.shape[0]
+        all_points = []  # list of [N_valid, 2] per image
+        all_labels = []
+        any_present = torch.zeros(B, dtype=torch.bool, device=device)
+
+        for k in range(K):
+            proto_k = proto[k].flatten(1)  # [1, 256]
+            resp_k = self._compute_response_map(
+                feats_flat, proto_k, B, H, W, method=method)  # [B, H, W]
+            max_resp_k = resp_k.view(B, -1).max(dim=1)[0]  # [B]
+            any_present = any_present | (max_resp_k >= presence_thresh)
+
+            for b in range(B):
+                if max_resp_k[b] < presence_thresh:
+                    continue
+                resp = resp_k[b]
+                flat = resp.flatten()
+                k_topk = min(topk, H * W)
+                topk_vals, topk_idx = flat.topk(k_topk)
+                y_idx = (topk_idx // W).float() / H
+                x_idx = (topk_idx % W).float() / W
+                pts = torch.stack([x_idx, y_idx], dim=1).clamp(0, 1)  # [topk, 2]
+                if b < len(all_points):
+                    all_points[b] = torch.cat([all_points[b], pts], dim=0)
+                    all_labels[b] = torch.cat([all_labels[b],
+                                               torch.ones(pts.shape[0], dtype=torch.long, device=device)])
+                else:
+                    all_points.append(pts)
+                    all_labels.append(torch.ones(pts.shape[0], dtype=torch.long, device=device))
+
+        # Fill in missing batch entries
+        while len(all_points) < B:
+            all_points.append(torch.zeros(0, 2, device=device, dtype=dtype))
+            all_labels.append(torch.zeros(0, dtype=torch.long, device=device))
+
+        if any_present.sum() == 0:
+            return None
+
+        max_pts = max(p.shape[0] for p in all_points)
+        if max_pts == 0:
+            return Prompt()
+
+        points = torch.zeros(max_pts, B, 2, device=device, dtype=dtype)
+        point_labels = torch.zeros(max_pts, B, dtype=torch.long, device=device)
+        point_mask = torch.ones(B, max_pts, dtype=torch.bool, device=device)
+
+        for b in range(B):
+            n = all_points[b].shape[0]
+            points[:n, b, :] = all_points[b]
+            point_labels[:n, b] = all_labels[b]
+            point_mask[b, :n] = False
+
+        return Prompt(
+            point_embeddings=points,
+            point_mask=point_mask,
+            point_labels=point_labels,
+        )
+
     def _build_point_prompt(self, response, B, H, W, device, dtype, topk,
                              max_response, presence_thresh):
-        """Build a point geometric prompt from response map (top-K points).
+        """Build a point geometric prompt from response map.
 
         Args:
             response: [B, H, W] response map
             B, H, W: dimensions
             device, dtype: torch device and dtype
-            topk: number of top points to select
+            topk: number of points to select
             max_response: [B] max response per image
             presence_thresh: minimum response to consider present
 
@@ -1029,32 +1874,30 @@ class InferenceEngine:
         """
         from sam3.model.geometry_encoders import Prompt
 
-        # Collect valid points per image
-        all_points = []  # list of [N_valid, 2] per image
-        all_labels = []  # list of [N_valid] per image
-        N_points = topk  # fixed number of point slots
+        all_points = []
+        all_labels = []
+        N_points = topk
+        point_mode = getattr(self, 'geo_point_mode', 'centroid')
 
         for b in range(B):
             if max_response[b] < presence_thresh:
-                # Class not present: use dummy points at image center
                 pts = torch.full((N_points, 2), 0.5, device=device, dtype=dtype)
                 all_points.append(pts)
                 all_labels.append(torch.ones(N_points, dtype=torch.long, device=device))
             else:
-                resp = response[b]  # [H, W]
-                flat = resp.flatten()  # [H*W]
-                topk_vals, topk_idx = flat.topk(min(topk, H * W))
+                resp_np = response[b].cpu().numpy()  # [H, W]
 
-                # Convert flat indices to (y, x) -> normalized (x, y) in [0, 1]
-                y_idx = (topk_idx // W).float() / H
-                x_idx = (topk_idx % W).float() / W
-                pts = torch.stack([x_idx, y_idx], dim=1)  # [topk, 2]
+                if point_mode == "topk":
+                    pts = self._select_points_topk(resp_np, H, W, topk)
+                else:  # centroid
+                    pts = self._select_points_centroid(resp_np, H, W, topk)
+
+                pts = torch.as_tensor(pts, device=device, dtype=dtype)
                 pts = pts.clamp(0, 1)
 
                 all_points.append(pts)
                 all_labels.append(torch.ones(pts.shape[0], dtype=torch.long, device=device))
 
-        # Pad to uniform length across batch
         max_pts = max(p.shape[0] for p in all_points)
         if max_pts == 0:
             return Prompt()
@@ -1074,3 +1917,167 @@ class InferenceEngine:
             point_mask=point_mask,
             point_labels=point_labels,
         )
+
+    def _select_points_topk(self, resp_np, H, W, topk):
+        """Select global top-K highest response locations with spatial suppression."""
+        if topk <= 0:
+            return np.empty((0, 2), dtype=np.float64)
+        suppress_r = getattr(self, 'geo_topk_suppress_r', 0)
+        if suppress_r <= 0 or topk <= 1:
+            flat = resp_np.flatten()
+            k = min(topk, len(flat))
+            topk_idx = np.argpartition(flat, -k)[-k:]
+            topk_idx = topk_idx[np.argsort(flat[topk_idx])[::-1]][:topk]
+            y_idx = (topk_idx // W).astype(np.float64) / H
+            x_idx = (topk_idx % W).astype(np.float64) / W
+            return np.stack([x_idx, y_idx], axis=1)
+
+        # Greedy topk with spatial suppression
+        points = []
+        working = resp_np.copy()
+        for _ in range(topk):
+            flat = working.flatten()
+            if flat.max() <= 0:
+                break
+            idx = np.argmax(flat)
+            py, px = idx // W, idx % W
+            points.append([px / W, py / H])
+            # Suppress neighborhood
+            y_lo = max(0, py - suppress_r)
+            y_hi = min(H, py + suppress_r + 1)
+            x_lo = max(0, px - suppress_r)
+            x_hi = min(W, px + suppress_r + 1)
+            working[y_lo:y_hi, x_lo:x_hi] = -np.inf
+
+        return np.array(points) if points else np.empty((0, 2))
+
+    def _select_points_centroid(self, resp_np, H, W, topk):
+        """Select points via connected-component analysis.
+
+        Supports 'weighted' (response-weighted centroid), 'peak' (max response
+        pixel within CC), and 'interior_peak' (response × distance-to-boundary) methods.
+        """
+        if topk <= 0:
+            return np.empty((0, 2), dtype=np.float64)
+        method = getattr(self, 'geo_centroid_method', 'peak')
+        min_area = getattr(self, 'geo_centroid_min_area', 4)
+        thresh_ratio = getattr(self, 'geo_centroid_thresh_ratio', 0.7)
+        rmin, rmax = resp_np.min(), resp_np.max()
+        threshold = rmin + thresh_ratio * (rmax - rmin)
+        binary = (resp_np >= threshold).astype(np.int32)
+        if binary.sum() == 0:
+            return self._select_points_topk(resp_np, H, W, topk)
+        labeled, num_components = ndimage.label(binary, structure=np.ones((3, 3)))
+        if num_components == 0:
+            return self._select_points_topk(resp_np, H, W, topk)
+
+        def _pick_point(mask_2d, qscore):
+            """Pick a point from a binary mask based on method."""
+            if method == "interior_peak":
+                dist = ndimage.distance_transform_edt(mask_2d)
+                d_max = dist.max()
+                dist_norm = dist / d_max if d_max > 0 else dist
+                alpha = getattr(self, 'geo_centroid_interior_alpha', 0.5)
+                score = resp_np * (1.0 + alpha * dist_norm)
+                sy, sx = np.where(mask_2d)
+                scores = score[mask_2d]
+                idx = np.argmax(scores)
+                return (sx[idx] / W, sy[idx] / H, qscore)
+            elif method == "peak":
+                vals = resp_np[mask_2d]
+                idx = np.argmax(vals)
+                sy, sx = np.where(mask_2d)
+                return (sx[idx] / W, sy[idx] / H, qscore)
+            else:
+                w = resp_np * mask_2d
+                tw = w.sum()
+                if tw < 1e-8:
+                    sy, sx = np.where(mask_2d)
+                    return (sx.mean() / W, sy.mean() / H, qscore)
+                else:
+                    cx = (w * gxs).sum() / tw / W
+                    cy = (w * gys).sum() / tw / H
+                    return (cx, cy, qscore)
+
+        all_points = []  # (cx_norm, cy_norm, qscore)
+        gys, gxs = np.mgrid[0:H, 0:W].astype(np.float64)
+
+        for cid in range(1, num_components + 1):
+            comp_mask = (labeled == cid)
+            area = comp_mask.sum()
+            if area < min_area:
+                continue
+
+            ys_pos, xs_pos = np.where(comp_mask)
+            y0, y1 = ys_pos.min(), ys_pos.max()
+            x0, x1 = xs_pos.min(), xs_pos.max()
+            bbox_h, bbox_w = y1 - y0 + 1, x1 - x0 + 1
+            aspect = max(bbox_h, bbox_w) / (min(bbox_h, bbox_w) + 1e-8)
+            fill_ratio = area / (bbox_h * bbox_w + 1e-8)
+
+            weights = resp_np * comp_mask
+            total_w = weights.sum()
+            area_beta = getattr(self, 'geo_centroid_area_beta', 0.0)
+            mean_resp = total_w / area if area > 0 else 0.0
+            if area_beta > 0:
+                # Quality-aware ranking: mean_response * area^beta
+                comp_qscore = (mean_resp * (area ** area_beta)) if total_w > 1e-8 else (area ** area_beta)
+            else:
+                comp_qscore = total_w if total_w > 1e-8 else float(area)
+
+            # Elongated & sparse → linear feature: subdivide along long axis
+            if aspect > 3.0 and fill_ratio < 0.35 and max(bbox_h, bbox_w) > 8:
+                n_sub = min(max(int(max(bbox_h, bbox_w) / 5), 2), 5)
+                sub_qscore = comp_qscore / n_sub
+                if bbox_h >= bbox_w:
+                    edges = np.linspace(y0, y1 + 1, n_sub + 1).astype(int)
+                    for s in range(n_sub):
+                        lm = (ys_pos >= edges[s]) & (ys_pos < edges[s + 1])
+                        if lm.sum() < 1:
+                            continue
+                        sm2d = np.zeros((H, W), dtype=bool)
+                        sm2d[ys_pos[lm], xs_pos[lm]] = True
+                        all_points.append(_pick_point(sm2d, sub_qscore))
+                else:
+                    edges = np.linspace(x0, x1 + 1, n_sub + 1).astype(int)
+                    for s in range(n_sub):
+                        lm = (xs_pos >= edges[s]) & (xs_pos < edges[s + 1])
+                        if lm.sum() < 1:
+                            continue
+                        sm2d = np.zeros((H, W), dtype=bool)
+                        sm2d[ys_pos[lm], xs_pos[lm]] = True
+                        all_points.append(_pick_point(sm2d, sub_qscore))
+            else:
+                # Compact component
+                all_points.append(_pick_point(comp_mask, comp_qscore))
+
+        if not all_points:
+            return self._select_points_topk(resp_np, H, W, topk)
+
+        all_points.sort(key=lambda p: p[2], reverse=True)
+        pts = np.array([[p[0], p[1]] for p in all_points[:topk]])
+
+        # Pad with topk on suppressed map
+        if len(all_points) < topk:
+            remaining = topk - len(all_points)
+            used_mask = np.zeros((H, W), dtype=bool)
+            for i in range(len(pts)):
+                px = np.clip(int(pts[i, 0] * W), 0, W - 1)
+                py = np.clip(int(pts[i, 1] * H), 0, H - 1)
+                r = max(1, min(H, W) // 20)
+                y_lo, y_hi = max(0, py - r), min(H, py + r + 1)
+                x_lo, x_hi = max(0, px - r), min(W, px + r + 1)
+                used_mask[y_lo:y_hi, x_lo:x_hi] = True
+            suppressed = resp_np.copy()
+            suppressed[used_mask] = -np.inf
+            flat = suppressed.flatten()
+            n_need = min(remaining, int((flat > -np.inf).sum()))
+            if n_need > 0:
+                topk_idx = np.argpartition(flat, -n_need)[-n_need:]
+                topk_idx = topk_idx[np.argsort(flat[topk_idx])[::-1]]
+                y_idx = (topk_idx // W).astype(np.float64) / H
+                x_idx = (topk_idx % W).astype(np.float64) / W
+                extra = np.stack([x_idx, y_idx], axis=1)
+                pts = np.concatenate([pts, extra], axis=0)
+
+        return pts

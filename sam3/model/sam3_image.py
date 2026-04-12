@@ -176,11 +176,6 @@ class Sam3Image(torch.nn.Module):
         encode_text=True,
         prev_mask_pred=None,
     ):
-        # index text features (note that regardless of early or late fusion, the batch size of
-        # `txt_feats` is always the number of *prompts* in the encoder)
-        txt_ids = find_input.text_ids
-        txt_feats = backbone_out["language_features"][:, txt_ids]
-        txt_masks = backbone_out["language_mask"][txt_ids]
         # "backbone_out": {
         #     "vision_features": [1, 256, 72, 72],
         #     "vision_pos_enc": [
@@ -216,6 +211,11 @@ class Sam3Image(torch.nn.Module):
                 dtype=geo_masks.dtype,
             )
         if encode_text:
+            # index text features (note that regardless of early or late fusion, the batch size of
+            # `txt_feats` is always the number of *prompts* in the encoder)
+            txt_ids = find_input.text_ids
+            txt_feats = backbone_out["language_features"][:, txt_ids]
+            txt_masks = backbone_out["language_mask"][txt_ids]
             prompt = torch.cat([txt_feats, geo_feats, visual_prompt_embed], dim=0)
             prompt_mask = torch.cat([txt_masks, geo_masks, visual_prompt_mask], dim=1)
         else:
@@ -541,6 +541,7 @@ class Sam3Image(torch.nn.Module):
         find_input,
         find_target,
         geometric_prompt: Prompt,
+        encode_text=True,
     ):
         # Text+geometry (box/point/mask) and optional visual prompt are compiled into a unified prompt tensor.
         # input:
@@ -575,6 +576,7 @@ class Sam3Image(torch.nn.Module):
                 backbone_out, find_input, geometric_prompt,
                 visual_prompt_embed=visual_prompt_embed,
                 visual_prompt_mask=visual_prompt_mask,
+                encode_text=encode_text,
             )
 
         # Run the encoder
