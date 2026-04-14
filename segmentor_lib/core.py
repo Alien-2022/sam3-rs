@@ -33,14 +33,10 @@ class InferenceEngine:
 
         # Visual prototype bank (set via set_visual_prototype_bank, None by default)
         self.visual_prototype_bank = None
-        self.prototype_inject_mode = None
         self._inter_class_sim = None
         self._geo_only_classes = None
         self._geo_only_mode = False
         self._current_geo_only_rerun = False  # True when current pass is a geo-only rerun
-        self._dinov3_resp_maps = {}  # per-prompt_idx response maps for resp_fusion
-        self.geo_resp_fusion_alpha = 0.0
-        self.geo_resp_fusion_thresh = 0.5
 
         # Initialize memory debugger
         self.memory_debugger = MemoryDebugger(
@@ -139,21 +135,16 @@ class InferenceEngine:
             })
 
             # Pre-compute per-class geometric prompts from visual prototypes
-            inject_mode = getattr(self, 'prototype_inject_mode', 'lang')
             proto_geo_prompts = None
             dinov3_max_responses = {}
             dinov3_geo_prompts_full = None  # full geo prompts for two-pass rerun
-            use_two_pass = (inject_mode == "dinov3_geo_point"
-                            and self.visual_prototype_bank is not None
+            use_two_pass = (self.visual_prototype_bank is not None
                             and self.geo_presence_sam3_thresh > 0)
-            if inject_mode == "dinov3_geo_point" and self.visual_prototype_bank is not None:
+            if self.visual_prototype_bank is not None:
                 dinov3_geo_prompts_full, dinov3_max_responses = self._compute_dinov3_geo_prompts(image, batch_size=1)
                 if not use_two_pass:
                     proto_geo_prompts = dinov3_geo_prompts_full
                 # else: two-pass mode, proto_geo_prompts stays None, will inject conditionally
-            elif inject_mode in ("geo_box", "geo_point") and self.visual_prototype_bank is not None:
-                backbone_out_preview = inference_state["backbone_out"]
-                proto_geo_prompts = self._compute_proto_geo_prompts(backbone_out_preview, batch_size=1)
 
             # Process each prompt
             for prompt_idx, prompt_word in enumerate(self.prompts["names"]):
@@ -164,9 +155,8 @@ class InferenceEngine:
                 # Reset prompts for clean inference
                 self.processor.reset_all_prompts(inference_state)
 
-                # Get backbone_out for this image (cache original for vision injection)
+                # Get backbone_out for this image
                 backbone_out = inference_state["backbone_out"]
-                original_backbone_fpn = backbone_out.get("backbone_fpn")
 
                 # Get class_id for this prompt
                 class_id = self.prompts["indices"][prompt_idx]
@@ -179,9 +169,15 @@ class InferenceEngine:
                 need_geo_rerun = False
                 if use_two_pass and prompt_idx in dinov3_max_responses:
                     dinov3_resp = dinov3_max_responses[prompt_idx]
+                    has_geo_prompt = (dinov3_geo_prompts_full is not None
+                                      and prompt_idx in dinov3_geo_prompts_full)
                     if dinov3_resp >= self.geo_presence_threshold:
                         # This class has high DINOv3 confidence → candidate for enhancement
                         # but only if SAM3 is uncertain (will check after pass 1)
+                        need_geo_rerun = True
+                    elif getattr(self, 'geo_neg_independent', False) and has_geo_prompt:
+                        # geo_neg_independent: even without confident positive points,
+                        # if negative-only prompt was generated, still candidate for rerun
                         need_geo_rerun = True
 
                 # Set geometric_prompt: dummy for pass 1, geo prompt for pass 2 / normal mode
@@ -190,47 +186,15 @@ class InferenceEngine:
                 else:
                     inference_state["geometric_prompt"] = self.processor.model._get_dummy_prompt()
 
-                # Inject visual prototype into vision features if in vision mode
-                if inject_mode == "vision":
-                    self._inject_proto_to_vision(backbone_out, class_id)
-
-                # Apply pixel-level spatial attention on backbone_fpn[0]
-                if inject_mode == "pixel_attn":
-                    self._apply_pixel_attention(backbone_out, class_id)
-
                 output = None
                 # Use pre-computed text features if available, otherwise real-time encoding
                 if self.text_features_cache is not None and prompt_idx in self.text_features_cache:
                     cached_features = self.text_features_cache[prompt_idx]
-                    # Inject visual prototype
-                    if inject_mode == "concat":
-                        # Concat mode: append prototype as extra token
-                        injected = self._inject_proto_as_token(cached_features, class_id)
-                        backbone_out.update(injected)
-                    elif inject_mode == "replace_last":
-                        injected = self._inject_proto_replace_last(cached_features, class_id)
-                        backbone_out.update(injected)
-                    elif (inject_mode == "lang"
-                            and self.visual_prototype_bank is not None
-                            and class_id in self.visual_prototype_bank):
-                        proto = self.visual_prototype_bank[class_id]  # [1, 1, 256], L2-norm=1
-                        lang_feats = cached_features["language_features"].to(self.device)
-                        proto = proto.to(self.device).to(lang_feats.dtype)
-                        # Scale-aligned injection: scale proto to text_features norm * alpha
-                        text_norm = lang_feats.norm()
-                        alpha = getattr(self, 'prototype_alpha', 1.0)
-                        lang_feats = lang_feats + alpha * text_norm * proto
-                        backbone_out.update({
-                            "language_features": lang_feats,
-                            "language_mask": cached_features["language_mask"],
-                            "language_embeds": cached_features.get("language_embeds"),
-                        })
-                    else:
-                        backbone_out.update({
-                            "language_features": cached_features["language_features"],
-                            "language_mask": cached_features["language_mask"],
-                            "language_embeds": cached_features["language_embeds"],
-                        })
+                    backbone_out.update({
+                        "language_features": cached_features["language_features"],
+                        "language_mask": cached_features["language_mask"],
+                        "language_embeds": cached_features["language_embeds"],
+                    })
                     # Run grounding inference
                     self.memory_debugger.log_cuda_memory(f"  [Before _forward_grounding] using cached text features")
                     output = self.processor._forward_grounding(inference_state)
@@ -382,42 +346,6 @@ class InferenceEngine:
                             presence_score = output.get("presence_score", 0)
                             semantic_logits = semantic_logits * presence_score
 
-                    # ===== DINOv3 Response Map Fusion (at decoder native resolution) =====
-                    # Inject response map at the semantic head's native resolution (e.g., 288×288)
-                    # instead of after upsampling to (h, w). This reduces upsampling from 128→2048
-                    # to 128→288 (2.25x), letting SAM3's own interpolation handle the final upscale.
-                    if self.geo_resp_fusion_alpha > 0 and prompt_idx in self._dinov3_resp_maps:
-                        resp_np = self._dinov3_resp_maps[prompt_idx]  # [128, 128]
-                        if self._geo_only_classes is None or class_id in self._geo_only_classes:
-                            H_sem, W_sem = semantic_logits.shape[2], semantic_logits.shape[3]
-                            # Normalize response to [0, 1]
-                            rmin, rmax = resp_np.min(), resp_np.max()
-                            if rmax - rmin > 1e-8:
-                                resp_norm = (resp_np - rmin) / (rmax - rmin)
-                            else:
-                                resp_norm = np.zeros_like(resp_np)
-                            resp_tensor = torch.as_tensor(
-                                resp_norm, device=self.device, dtype=torch.float32
-                            )
-                            # Upsample 128 → H_sem (e.g., 128→288, nearest to preserve sharpness)
-                            resp_up = F.interpolate(
-                                resp_tensor.unsqueeze(0).unsqueeze(0),
-                                size=(H_sem, W_sem), mode="nearest"
-                            ).squeeze(0).squeeze(0)  # [H_sem, W_sem]
-                            # Scale to match semantic_logits magnitude (after presence_score scaling)
-                            sem_abs_max = semantic_logits.abs().max()
-                            if sem_abs_max > 1e-8:
-                                scale = sem_abs_max / (resp_up.abs().max() + 1e-8)
-                            else:
-                                scale = 1.0
-                            resp_up = resp_up * scale
-                            # Threshold: only boost high-confidence response pixels
-                            resp_thresh = scale * self.geo_resp_fusion_thresh
-                            resp_mask = (resp_up >= resp_thresh).float()
-                            # Add to semantic logits at native resolution
-                            alpha = self.geo_resp_fusion_alpha
-                            semantic_logits = semantic_logits + alpha * resp_up.unsqueeze(0).unsqueeze(0) * resp_mask.unsqueeze(0).unsqueeze(0)
-
                     # Now interpolate to (h, w) — SAM3's own interpolation handles final upscale
                     semantic_logits = F.interpolate(
                         semantic_logits,
@@ -446,10 +374,6 @@ class InferenceEngine:
                         current_logits = current_logits * presence_score
 
                 seg_logits[prompt_idx] = current_logits
-
-                # Restore original backbone_fpn if vision injection was applied
-                if original_backbone_fpn is not None:
-                    backbone_out["backbone_fpn"] = original_backbone_fpn
 
                 # ===== Clean up current prompt's intermediate variables =====
                 del output
@@ -545,9 +469,8 @@ class InferenceEngine:
             )
 
             # Pre-compute per-class geometric prompts from visual prototypes
-            inject_mode = getattr(self, 'prototype_inject_mode', 'lang')
             proto_geo_prompts = None
-            if inject_mode == "dinov3_geo_point" and self.visual_prototype_bank is not None:
+            if self.visual_prototype_bank is not None:
                 # DINOv3: batch extract features, then per-image geo prompts, merge into batch
                 precomputed = self._extract_dinov3_features_batch(images)
                 # Collect per-image prompts first
@@ -570,8 +493,6 @@ class InferenceEngine:
                 for pidx, prompt_list in merged.items():
                     batch_merged[pidx] = self._build_batch_prompt(prompt_list, batch_size)
                 proto_geo_prompts = batch_merged if batch_merged else None
-            elif inject_mode in ("geo_box", "geo_point") and self.visual_prototype_bank is not None:
-                proto_geo_prompts = self._compute_proto_geo_prompts(backbone_out, batch_size)
 
             # 3. Loop through each Prompt (Decoder / Grounding)
             for prompt_idx, prompt_word in enumerate(self.prompts["names"]):
@@ -584,45 +505,13 @@ class InferenceEngine:
                 # Get pre-computed text features from cache
                 class_id = self.prompts["indices"][prompt_idx]
 
-                # Inject visual prototype into vision features if in vision mode
-                if inject_mode == "vision":
-                    self._inject_proto_to_vision(backbone_out, class_id)
-
-                # Apply pixel-level spatial attention on backbone_fpn[0]
-                if inject_mode == "pixel_attn":
-                    self._apply_pixel_attention(backbone_out, class_id)
-
                 if self.text_features_cache is not None and prompt_idx in self.text_features_cache:
                     cached_features = self.text_features_cache[prompt_idx]
-                    # Inject visual prototype
-                    if inject_mode == "concat":
-                        # Concat mode: append prototype as extra token
-                        injected = self._inject_proto_as_token(cached_features, class_id)
-                        backbone_out.update(injected)
-                    elif inject_mode == "replace_last":
-                        injected = self._inject_proto_replace_last(cached_features, class_id)
-                        backbone_out.update(injected)
-                    elif (inject_mode == "lang"
-                            and self.visual_prototype_bank is not None
-                            and class_id in self.visual_prototype_bank):
-                        proto = self.visual_prototype_bank[class_id]  # [1, 1, 256], L2-norm=1
-                        lang_feats = cached_features["language_features"].to(self.device)
-                        proto = proto.to(self.device).to(lang_feats.dtype)
-                        # Scale-aligned injection: scale proto to text_features norm * alpha
-                        text_norm = lang_feats.norm()
-                        alpha = getattr(self, 'prototype_alpha', 1.0)
-                        lang_feats = lang_feats + alpha * text_norm * proto
-                        backbone_out.update({
-                            "language_features": lang_feats,
-                            "language_mask": cached_features["language_mask"],
-                            "language_embeds": cached_features.get("language_embeds"),
-                        })
-                    else:
-                        backbone_out.update({
-                            "language_features": cached_features["language_features"],
-                            "language_mask": cached_features["language_mask"],
-                            "language_embeds": cached_features["language_embeds"],
-                        })
+                    backbone_out.update({
+                        "language_features": cached_features["language_features"],
+                        "language_mask": cached_features["language_mask"],
+                        "language_embeds": cached_features["language_embeds"],
+                    })
                 else:
                     # Fallback to real-time computation
                     text_outputs = self.processor.model.backbone.forward_text(
@@ -808,133 +697,87 @@ class InferenceEngine:
         self.text_features_cache = cache
 
     def set_visual_prototype_bank(self, prototypes: Optional[Dict],
-                                   mode: str = "geo_point",
-                                   geo_threshold: float = 0.3, geo_topk: int = 10,
-                                   geo_correlation: str = "cosine",
+                                   geo_topk: int = 10,
                                    geo_presence_threshold: float = 0.0,
-                                   geo_fpn_level: int = -1,
-                                   geo_fusion: str = "mean",
                                    geo_skip_bg_idx: Optional[int] = None,
-                                   pixel_attn_alpha: float = 10.0,
-                                   pixel_attn_threshold: float = 0.3,
-                               geo_point_mode: str = "centroid",
-                               geo_centroid_thresh_ratio: float = 0.7,
-                               geo_centroid_method: str = "peak",
-                               geo_centroid_min_area: int = 4,
-                               geo_topk_suppress_r: int = 0,
-                               geo_centroid_area_beta: float = 0.0,
-                               dinov3_weights: Optional[str] = None,
+                                   geo_point_mode: str = "centroid",
+                                   geo_centroid_thresh_ratio: float = 0.7,
+                                   geo_centroid_min_area: int = 4,
+                                   geo_topk_suppress_r: int = 0,
+                                   geo_centroid_area_beta: float = 0.0,
+                                   geo_centroid_method: str = "peak",
+                                   dinov3_weights: Optional[str] = None,
                                    dinov3_input_size: int = 1008,
                                    geo_presence_sam3_thresh: float = 0.0,
-                                   geo_resp_fusion_alpha: float = 0.0,
-                                   geo_resp_fusion_thresh: float = 0.5,
                                    dinov3_layers: Optional[list] = None,
                                    geo_competition: str = "none",
+                                   geo_neg_topk: int = 0,
                                    inter_class_sim: Optional[dict] = None,
                                    geo_only_classes: Optional[list] = None,
-                                   geo_only_mode: bool = False):
+                                   geo_only_mode: bool = False,
+                                   geo_neg_independent: bool = False):
         """Set the visual prototype bank for class-conditional visual guidance.
 
+        Uses DINOv3 features to compute per-class response maps, then generates
+        geometric point prompts (positive/negative) injected into SAM3's
+        SequenceGeometryEncoder via cross-attention.
+
         Args:
-            prototypes: Dict mapping class_id -> prototype tensor [1, 1, 256] (single-level)
-                        or class_id -> {level: [1, 1, 256]} (multi-level).
-            mode: Injection mode.
-                - "geo_box": bounding boxes from response maps -> geometric prompts
-                - "geo_point": points from response maps -> geometric prompts (default)
-                - "pixel_attn": spatial attention on backbone_fpn[0] (288x288) before PixelDecoder
-            geo_threshold: threshold for response map binarization (box mode only).
-            geo_topk: number of points to select as point prompts (point mode only).
-            geo_correlation: correlation method for response map computation.
-                - "cosine": cosine similarity (default)
-                - "dot": raw dot product (preserves magnitude)
-                - "euclidean_inv": inverse euclidean distance 1/(1+||f-p||)
-                - "channel_attn": channel-wise attention weighting
-            geo_presence_threshold: minimum max-response value to add geo prompt.
-                0.0 = always add (default). Set higher to filter absent classes.
-            geo_fpn_level: which FPN level to compute response map on (single-level).
-                -1 = 72x72 (default, matches encoder), -2 = 144x144, -3 = 288x288.
-                Points/boxes are always normalized to [0,1] so any level works.
-            geo_fusion: multi-level fusion method. "mean" (response-level average).
-            geo_skip_bg_idx: if set, skip geo prompt injection for this class_id
-                (typically background, e.g. 0 for Potsdam). Background is vague,
-                so geo points/boxes may introduce noise. Only text prompt is used.
-            pixel_attn_alpha: sharpness of sigmoid for pixel_attn mode (default: 10.0).
-                Higher = sharper transition, lower = softer attention.
-            pixel_attn_threshold: center of sigmoid for pixel_attn mode (default: 0.3).
-                Response values above this get amplified, below get suppressed.
-            geo_point_mode: point selection strategy for geo_point mode.
-                - "centroid": threshold response map, find connected components,
-                  compute weighted centroid per component (default, more robust for
-                  continuous/spatially distributed features).
-                - "topk": select global top-K highest response locations (original).
-            geo_centroid_thresh_ratio: fraction of (min+max) range to use as threshold
-                for centroid mode (default: 0.7). Higher = stricter threshold = fewer
-                but more confident regions.
-            dinov3_weights: path to DINOv3 SAT model directory (for dinov3_geo_point mode).
-            dinov3_input_size: input resolution for DINOv3 (default: 1008 -> 63x63 patches).
-            geo_competition: class competition mode for response maps (dinov3_geo_point only).
-                - "none": no competition, use raw response maps (default)
-                - "mean": subtract mean of other classes' response maps
-                - "max": subtract max of other classes' response maps
-                - "weighted": subtract weighted mean using inter-class prototype similarity
-                Helps suppress regions where multiple similar classes have high responses.
-            inter_class_sim: pre-computed inter-class cosine similarity matrix from bank file.
-                Dict[class_id -> {other_id: similarity}]. If provided, used directly in
-                weighted competition mode without recomputation.
-            geo_only_classes: if set, only inject geo prompts for these class IDs (list of ints).
-                Other classes get text-only prompts. Useful for diagnostic per-class analysis.
-                None = inject for all classes (default).
+            prototypes: Dict mapping class_id -> prototype tensor [1, 1, C].
+            geo_topk: number of points to select as point prompts.
+            geo_presence_threshold: minimum max-response to add geo prompt.
+                0.0 = always add (default).
+            geo_skip_bg_idx: skip geo prompt injection for this class_id.
+            geo_point_mode: "centroid" (connected components + weighted center)
+                or "topk" (global top-K highest response locations).
+            geo_centroid_thresh_ratio: threshold ratio for centroid mode.
+            geo_competition: class competition mode.
+                - "none": no competition (default)
+                - "mean"/"max"/"weighted": subtract other classes' responses
+                - "exclusive": winner-take-all per pixel
+            geo_neg_topk: number of negative points to add from other classes'
+                response maps (default: 0, disabled). Each class's positive points
+                are supplemented with top-K points from other classes' competition-modified
+                response maps, labeled as negative (label=0) in the geometric prompt.
+            inter_class_sim: pre-computed inter-class cosine similarity matrix.
+            geo_only_classes: only inject geo prompts for these class IDs.
+            geo_only_mode: if True, two-pass rerun uses geo point ONLY (no text).
+            geo_neg_independent: if True, inject negative points even when positive
+                points are suppressed by geo_presence_threshold. This allows leveraging
+                the high-accuracy negative points (>94%) independently of positive point
+                confidence, useful for classes with low positive-point accuracy but
+                where negative points can still suppress cross-class confusion.
+            dinov3_weights: path to DINOv3 SAT model directory.
+            dinov3_input_size: input resolution for DINOv3.
         """
-        # Detect multi-level format
-        self.proto_multi_level = (
-            bool(prototypes) and isinstance(next(iter(prototypes.values())), dict)
-        )
-        if self.proto_multi_level:
-            self.proto_levels = sorted(
-                set().union(*(v.keys() for v in prototypes.values()))
-            )
-            print(f"  [core] Multi-level prototype bank: levels={self.proto_levels}, "
-                  f"fusion={geo_fusion}")
-        else:
-            self.proto_levels = None
         self.visual_prototype_bank = prototypes
-        self.prototype_inject_mode = mode
-        self.geo_box_threshold = geo_threshold
         self.geo_topk = geo_topk
-        self.geo_correlation = geo_correlation
         self.geo_presence_threshold = geo_presence_threshold
-        self.geo_fpn_level = geo_fpn_level
-        self.geo_fusion = geo_fusion
         self.geo_skip_bg_idx = geo_skip_bg_idx
-        self.pixel_attn_alpha = pixel_attn_alpha
-        self.pixel_attn_threshold = pixel_attn_threshold
         self.geo_point_mode = geo_point_mode
         self.geo_centroid_thresh_ratio = geo_centroid_thresh_ratio
-        self.geo_centroid_method = geo_centroid_method
         self.geo_centroid_min_area = geo_centroid_min_area
         self.geo_topk_suppress_r = geo_topk_suppress_r
         self.geo_centroid_area_beta = geo_centroid_area_beta
+        self.geo_centroid_method = geo_centroid_method
         self.dinov3_input_size = dinov3_input_size
         self.geo_presence_sam3_thresh = geo_presence_sam3_thresh
         self.geo_competition = geo_competition
+        self.geo_neg_topk = geo_neg_topk
         self._inter_class_sim = inter_class_sim
         self._geo_only_classes = set(geo_only_classes) if geo_only_classes else None
         self._geo_only_mode = geo_only_mode
-        self.geo_resp_fusion_alpha = geo_resp_fusion_alpha
-        self.geo_resp_fusion_thresh = geo_resp_fusion_thresh
+        self.geo_neg_independent = geo_neg_independent
 
         # Load DINOv3 model if needed
         self._dinov3_model = None
         self._dinov3_n_reg = 0
         self._dinov3_transform = None
-        self._dinov3_layers = dinov3_layers  # list of layer indices, None = last layer only
-        if mode == "dinov3_geo_point":
-            if dinov3_weights is None:
-                raise ValueError("dinov3_weights is required for dinov3_geo_point mode")
+        self._dinov3_layers = dinov3_layers
+        if dinov3_weights is not None:
             self._load_dinov3_model(dinov3_weights)
             layers_info = f", layers={dinov3_layers}" if dinov3_layers else ""
-            print(f"  [core] DINOv3 model loaded for dinov3_geo_point mode, "
-                  f"input_size={dinov3_input_size}{layers_info}")
+            print(f"  [core] DINOv3 model loaded, input_size={dinov3_input_size}{layers_info}")
 
     def _load_dinov3_model(self, weights_path):
         """Load DINOv3 ViT-L/16 SAT model for feature extraction."""
@@ -956,237 +799,10 @@ class InferenceEngine:
             v2.Normalize(mean=[0.430, 0.411, 0.296], std=[0.213, 0.156, 0.143]),
         ])
 
-    def _inject_proto_as_token(self, cached_features: dict, class_id: int) -> dict:
-        """Append visual prototype as an extra token to language_features.
 
-        Extends language_features from [32, 1, 256] to [33, 1, 256] and
-        language_mask from [1, 32] to [1, 33]. The prototype is scaled to
-        match the norm of the original language_features (mean per-token norm),
-        so the cross-attention can naturally attend to it.
 
-        Returns:
-            dict with updated language_features, language_mask, language_embeds.
-        """
-        if self.visual_prototype_bank is None or class_id not in self.visual_prototype_bank:
-            return cached_features
 
-        proto = self.visual_prototype_bank[class_id]  # [1, 1, 256], L2-norm=1
-        lang_feats = cached_features["language_features"].to(self.device)  # [T, 1, 256]
-        lang_mask = cached_features["language_mask"].to(self.device)       # [1, T]
-        alpha = getattr(self, 'prototype_alpha', 1.0)
 
-        T, B, D = lang_feats.shape  # T=32, B=1, D=256
-
-        # Scale prototype to match per-token norm of language_features
-        # lang_feats norm ~ 93 globally, per-token norm ~ 93/sqrt(32) ~ 16.4
-        per_token_norm = lang_feats.flatten(1).norm(dim=1).mean()  # mean L2 norm per token
-        proto_token = alpha * per_token_norm * proto  # [1, 1, 256]
-        proto_token = proto_token.to(lang_feats.dtype)  # match dtype (bfloat16)
-
-        # Concatenate: [T, 1, 256] + [1, 1, 256] -> [T+1, 1, 256]
-        new_feats = torch.cat([lang_feats, proto_token], dim=0)  # [33, 1, 256]
-
-        # Extend mask: [1, 32] -> [1, 33], new token is valid (False = not masked)
-        new_mask = torch.cat([
-            lang_mask,
-            torch.zeros(1, 1, dtype=lang_mask.dtype, device=self.device),
-        ], dim=1)  # [1, 33]
-
-        # language_embeds is NOT used by the grounding decoder, pass through unchanged
-        return {
-            "language_features": new_feats,
-            "language_mask": new_mask,
-            "language_embeds": cached_features.get("language_embeds"),
-        }
-
-    def _inject_proto_replace_last(self, cached_features: dict, class_id: int) -> dict:
-        """Replace the last token of language_features with a scaled visual prototype.
-
-        Keeps shape [32, 1, 256] and mask [1, 32] unchanged. The prototype is scaled
-        to match the per-token norm of language_features so it looks like a natural text
-        token to the cross-attention layers.
-
-        Returns:
-            dict with updated language_features, language_mask, language_embeds.
-        """
-        if self.visual_prototype_bank is None or class_id not in self.visual_prototype_bank:
-            return cached_features
-
-        proto = self.visual_prototype_bank[class_id]  # [1, 1, 256], L2-norm=1
-        lang_feats = cached_features["language_features"].to(self.device)  # [T, 1, 256]
-        alpha = getattr(self, 'prototype_alpha', 1.0)
-
-        T, B, D = lang_feats.shape  # T=32, B=1, D=256
-
-        # Scale prototype to match per-token norm
-        per_token_norm = lang_feats.flatten(1).norm(dim=1).mean()
-        proto_scaled = alpha * per_token_norm * proto  # [1, 1, 256]
-        proto_scaled = proto_scaled.to(lang_feats.dtype)
-
-        # Replace last token (clone to avoid modifying cached features)
-        new_feats = lang_feats.clone()
-        new_feats[-1:] = proto_scaled  # replace position T-1
-
-        return {
-            "language_features": new_feats,
-            "language_mask": cached_features["language_mask"],
-            "language_embeds": cached_features.get("language_embeds"),
-        }
-
-    def _inject_proto_to_vision(self, backbone_out: dict, class_id: int):
-        """Inject visual prototype into backbone_fpn[-1] (vision feature space).
-
-        Prototype is broadcast-added to all spatial positions of the last FPN level.
-        This works because the prototype was extracted from the same FPN level and
-        thus lives in the same feature space.
-        """
-        if self.visual_prototype_bank is None or class_id not in self.visual_prototype_bank:
-            return
-        if "backbone_fpn" not in backbone_out:
-            return
-
-        fpn = backbone_out["backbone_fpn"]
-        if not isinstance(fpn, list) or len(fpn) == 0:
-            return
-
-        proto = self.visual_prototype_bank[class_id]  # [1, 1, 256]
-        # Target the last FPN level (same level used for prototype extraction)
-        feat = fpn[-1]  # [B, C, H, W], e.g. [1, 256, 72, 72]
-        proto = proto.to(feat.device, dtype=feat.dtype)  # [1, 1, 256]
-
-        # Scale: alpha * feat_channel_norm * proto
-        # feat_channel_norm = mean L2 norm across spatial positions (per-channel)
-        alpha = getattr(self, 'prototype_alpha', 1.0)
-        # Use the mean spatial feature norm as reference
-        spatial_feats = feat.flatten(2).permute(0, 2, 1)  # [B, HW, C]
-        feat_norm = spatial_feats.norm(dim=-1).mean()  # scalar: mean L2 norm of spatial vectors
-        scaled_proto = alpha * feat_norm * proto  # [1, 1, 256]
-
-        # Broadcast add: [1, 1, 256] -> [B, C, H, W]
-        # proto shape [1, 1, 256] = [B_spatial=1, C=1, D=256], need to match [B, 256, H, W]
-        # Reshape proto to [1, 256, 1, 1] and broadcast
-        scaled_proto = scaled_proto.squeeze(0).permute(1, 0).unsqueeze(-1).unsqueeze(-1)  # [256, 1, 1]
-
-        # Deep copy the FPN list to avoid modifying cached features for other prompts
-        fpn_new = list(fpn)
-        fpn_new[-1] = feat + scaled_proto  # [B, 256, H, W]
-        backbone_out["backbone_fpn"] = fpn_new
-
-    def _apply_pixel_attention(self, backbone_out: dict, class_id: int):
-        """Apply spatial attention on backbone_fpn[0] (288x288) using visual prototype.
-
-        Computes cosine similarity between Level-2 prototype and Level-2 features
-        (72x72, has semantic discrimination) to get a spatial response map, then
-        upsamples to 288x288 and applies sigmoid attention on backbone_fpn[0].
-
-        This combines Level-2's semantic discrimination with Level-0's high resolution.
-
-        The attention is applied to backbone_fpn[0] BEFORE it enters PixelDecoder,
-        so both pred_masks and semantic_seg are affected through the fused pixel_embed.
-
-        Args:
-            backbone_out: Dict containing "backbone_fpn" list of FPN features.
-            class_id: class ID to compute attention for.
-        """
-        if self.visual_prototype_bank is None or class_id not in self.visual_prototype_bank:
-            return
-        if "backbone_fpn" not in backbone_out:
-            return
-
-        fpn = backbone_out["backbone_fpn"]
-        if not isinstance(fpn, list) or len(fpn) < 3:
-            return
-
-        # Get Level-2 prototype (handle both single-level and multi-level formats)
-        proto_data = self.visual_prototype_bank[class_id]
-        if isinstance(proto_data, dict):
-            # Multi-level: use level 2 (72x72, semantic) for discrimination
-            proto = proto_data.get(2, next(iter(proto_data.values())))
-        else:
-            proto = proto_data  # [1, 1, 256], L2-norm=1
-
-        # Compute response map on Level 2 (72x72) for semantic discrimination
-        feat_sem = fpn[-1]  # [B, 256, Hs, Ws] where Hs=Ws=72
-        B, C, Hs, Ws = feat_sem.shape
-        device = feat_sem.device
-        dtype = feat_sem.dtype
-
-        proto = proto.to(device, dtype=dtype)
-        proto_flat = proto.flatten(1)  # [1, 256]
-        feats_flat = feat_sem.flatten(2)  # [B, 256, Hs*Ws]
-
-        # Cosine similarity response map at semantic resolution
-        feats_norm = F.normalize(feats_flat, p=2, dim=1)
-        proto_norm = F.normalize(proto_flat, p=2, dim=1)
-        response = torch.bmm(
-            proto_norm.unsqueeze(0).expand(B, -1, -1), feats_norm
-        )  # [B, 1, Hs*Ws]
-        response = response.view(B, 1, Hs, Ws)  # [B, 1, 72, 72]
-
-        # Upsample response map to Level 0 resolution (288x288)
-        H0, W0 = fpn[0].shape[2], fpn[0].shape[3]
-        response_up = F.interpolate(
-            response, size=(H0, W0), mode='bilinear', align_corners=False
-        )  # [B, 1, 288, 288]
-        response_up = response_up.view(B, H0, W0)
-
-        # Sigmoid spatial attention: sigmoid(alpha * (response - threshold))
-        alpha = self.pixel_attn_alpha
-        threshold = self.pixel_attn_threshold
-        attention = torch.sigmoid(alpha * (response_up - threshold))  # [B, H0, W0]
-
-        # Apply attention to backbone_fpn[0]
-        attention_map = attention.unsqueeze(1)  # [B, 1, H0, W0]
-        feat_hr = fpn[0]  # [B, 256, H0, W0]
-
-        # Deep copy the FPN list to avoid modifying cached features
-        fpn_new = list(fpn)
-        fpn_new[0] = feat_hr * attention_map  # [B, 256, H0, W0]
-        backbone_out["backbone_fpn"] = fpn_new
-
-    def _masks_to_boxes(self, masks: torch.Tensor) -> torch.Tensor:
-        """Convert binary masks to bounding boxes.
-
-        Args:
-            masks: [N, H, W] tensor of binary masks (values > 0 are considered foreground)
-
-        Returns:
-            boxes: [N, 4] tensor of boxes in [x1, y1, x2, y2] format
-        """
-        N, H, W = masks.shape
-        if N == 0:
-            return torch.zeros((0, 4), device=masks.device, dtype=masks.dtype)
-
-        # Create coordinate grids
-        y_coords = torch.arange(H, device=masks.device, dtype=masks.dtype).view(1, H, 1)
-        x_coords = torch.arange(W, device=masks.device, dtype=masks.dtype).view(1, 1, W)
-
-        # Expand to [N, H, W]
-        y_coords = y_coords.expand(N, H, W)
-        x_coords = x_coords.expand(N, H, W)
-
-        # Mask out background pixels (set to large/small values that won't affect min/max)
-        masked_y = torch.where(masks > 0, y_coords, torch.full_like(y_coords, H))
-        masked_x = torch.where(masks > 0, x_coords, torch.full_like(x_coords, W))
-        masked_y_neg = torch.where(masks > 0, y_coords, torch.full_like(y_coords, -1))
-        masked_x_neg = torch.where(masks > 0, x_coords, torch.full_like(x_coords, -1))
-
-        # Find bounding box coordinates
-        y1 = masked_y_neg.view(N, -1).max(dim=1)[0]
-        x1 = masked_x_neg.view(N, -1).max(dim=1)[0]
-        y2 = masked_y.view(N, -1).min(dim=1)[0]
-        x2 = masked_x.view(N, -1).min(dim=1)[0]
-
-        # Clamp to valid range
-        y1 = torch.clamp(y1, 0, H - 1)
-        x1 = torch.clamp(x1, 0, W - 1)
-        y2 = torch.clamp(y2, 0, H - 1)
-        x2 = torch.clamp(x2, 0, W - 1)
-
-        # Stack to [N, 4]
-        boxes = torch.stack([x1, y1, x2, y2], dim=1)
-
-        return boxes
 
     def _extract_dinov3_features_batch(self, images):
         """Extract DINOv3 patch tokens from a batch of PIL images.
@@ -1316,11 +932,17 @@ class InferenceEngine:
         # ---- Phase 1: compute ALL raw response maps ----
         class_responses = {}  # class_id -> numpy [H, W]
         class_prompt_ids = {}  # class_id -> list[prompt_idx]
+        neg_independent = getattr(self, 'geo_neg_independent', False)
         for prompt_idx in range(self.num_prompts):
             class_id = self.prompts["indices"][prompt_idx]
             if skip_bg is not None and class_id == skip_bg:
                 continue
-            if self._geo_only_classes is not None and class_id not in self._geo_only_classes:
+            # When geo_neg_independent: compute response for ALL classes (needed for
+            # generating negative points for non-only-classes). Otherwise, only compute
+            # for geo_only_classes.
+            if (not neg_independent
+                    and self._geo_only_classes is not None
+                    and class_id not in self._geo_only_classes):
                 continue
             if class_id not in self.visual_prototype_bank:
                 continue
@@ -1400,6 +1022,7 @@ class InferenceEngine:
         # ---- Phase 3: select points from (possibly modified) response maps ----
         prompt_geo = {}
         max_responses = {}
+        neg_topk = self.geo_neg_topk
         for class_id, response in class_responses.items():
             prompt_idx_list = class_prompt_ids[class_id]
             max_response = response.max()
@@ -1407,24 +1030,55 @@ class InferenceEngine:
             for pidx in prompt_idx_list:
                 max_responses[pidx] = max_response
 
-            if max_response < presence_thresh:
+            # Determine if this class is eligible for positive point injection
+            is_pos_class = (self._geo_only_classes is None
+                            or class_id in self._geo_only_classes)
+            positive_confident = max_response >= presence_thresh
+
+            # Skip if: not eligible for positive, not confident, and neg_independent is off
+            if not is_pos_class and not positive_confident and not neg_independent:
                 continue
 
+            # --- Positive points: only for pos-eligible classes with sufficient confidence ---
             resp_np = response  # numpy [H, W]
-            if point_mode == "topk":
-                pts = self._select_points_topk(resp_np, H, W, topk)
-            else:
-                pts = self._select_points_centroid(resp_np, H, W, topk)
+            pts = np.empty((0, 2), dtype=np.float64)
+            if is_pos_class and positive_confident:
+                if point_mode == "topk":
+                    pts = self._select_points_topk(resp_np, H, W, topk)
+                else:
+                    pts = self._select_points_centroid(resp_np, H, W, topk)
 
-            if pts.shape[0] == 0:
+            # --- Negative points from other classes ---
+            neg_pts = np.empty((0, 2), dtype=np.float64)
+            if neg_topk > 0 and len(class_responses) > 1:
+                # Collect other classes' responses, find combined high-response points
+                other_responses = []
+                for oid, oresp in class_responses.items():
+                    if oid != class_id:
+                        other_responses.append(oresp)
+                if other_responses:
+                    # Merge other classes by taking element-wise max
+                    others_merged = np.stack(other_responses, axis=0).max(axis=0)
+                    neg_pts = self._select_points_topk(others_merged, H, W, neg_topk)
+
+            n_pos = pts.shape[0]
+            n_neg = neg_pts.shape[0]
+            if n_pos == 0 and n_neg == 0:
                 continue
 
-            pts_tensor = torch.as_tensor(pts, device=self.device, dtype=torch.float32)
+            # Combine positive and negative points
+            all_pts = np.concatenate([pts, neg_pts], axis=0) if n_neg > 0 else pts
+            all_labels = np.concatenate([
+                np.ones(n_pos, dtype=np.int64),
+                np.zeros(n_neg, dtype=np.int64),
+            ])
+
+            pts_tensor = torch.as_tensor(all_pts, device=self.device, dtype=torch.float32)
             pts_tensor = pts_tensor.clamp(0, 1)
             n_pts = pts_tensor.shape[0]
 
             points = pts_tensor.unsqueeze(1)  # [n_pts, 1]
-            point_labels = torch.ones(n_pts, 1, dtype=torch.long, device=self.device)
+            point_labels = torch.as_tensor(all_labels, device=self.device, dtype=torch.long).unsqueeze(1)
             point_mask = torch.zeros(1, n_pts, dtype=torch.bool, device=self.device)
 
             geo_prompt = Prompt(
@@ -1436,46 +1090,7 @@ class InferenceEngine:
             for pidx in prompt_idx_list:
                 prompt_geo[pidx] = geo_prompt
 
-        # Store response maps for resp_fusion (per-class → per-prompt_idx)
-        if self.geo_resp_fusion_alpha > 0:
-            self._dinov3_resp_maps = {}
-            for class_id, response in class_responses.items():
-                for pidx in class_prompt_ids[class_id]:
-                    self._dinov3_resp_maps[pidx] = response.copy()
-        else:
-            self._dinov3_resp_maps = {}
-
         return (prompt_geo if prompt_geo else None), max_responses
-
-    @staticmethod
-    def _expand_prompt_to_batch(existing: 'Prompt', new_single: 'Prompt', b: int, batch_size: int):
-        """Expand a batch Prompt to include a new single-image Prompt at batch index b."""
-        from sam3.model.geometry_encoders import Prompt
-
-        if existing.point_embeddings is not None and new_single.point_embeddings is not None:
-            n_exist = existing.point_embeddings.shape[0]
-            n_new = new_single.point_embeddings.shape[0]
-            n_max = max(n_exist, n_new)
-            B = batch_size
-            device = existing.point_embeddings.device
-            dtype = existing.point_embeddings.dtype
-
-            pts = torch.zeros(n_max, B, 2, device=device, dtype=dtype)
-            labels = torch.zeros(n_max, B, dtype=torch.long, device=device)
-            mask = torch.ones(B, n_max, dtype=torch.bool, device=device)
-
-            # Copy existing data
-            pts[:n_exist, :, :] = existing.point_embeddings
-            labels[:n_exist, :] = existing.point_labels
-            mask[:, :n_exist] = existing.point_mask
-
-            # Insert new image's data at batch index b
-            pts[:n_new, b, :] = new_single.point_embeddings[:, 0, :]
-            labels[:n_new, b] = new_single.point_labels[:, 0]
-            mask[b, :n_new] = new_single.point_mask[0, :]
-
-            return Prompt(point_embeddings=pts, point_mask=mask, point_labels=labels)
-        return existing
 
     @staticmethod
     def _build_batch_prompt(prompt_list: list, batch_size: int):
@@ -1518,405 +1133,11 @@ class InferenceEngine:
 
         return Prompt(point_embeddings=pts, point_mask=mask, point_labels=labels)
 
-    def _compute_proto_geo_prompts(self, backbone_out: dict, batch_size: int):
-        """Compute per-class geometric prompts from visual prototype response maps.
 
-        Supports both single-level and multi-level fusion:
-        - Single-level: compute response at one FPN level, extract prompts.
-        - Multi-level: compute response at each level, upsample to finest resolution,
-          average, then extract prompts from the fused response map.
 
-        Args:
-            backbone_out: Dict containing backbone features (must have "backbone_fpn")
-            batch_size: Number of images in the batch
 
-        Returns:
-            Dict mapping prompt_idx -> Prompt object with geometric prompt,
-            or empty Prompt if the class has no prototype or response too weak.
-        """
-        from sam3.model.geometry_encoders import Prompt
 
-        if self.visual_prototype_bank is None:
-            return {}
 
-        if "backbone_fpn" not in backbone_out:
-            return {}
-
-        fpn_list = backbone_out["backbone_fpn"]
-        geo_mode = getattr(self, 'prototype_inject_mode', 'geo_point')
-        correlation = getattr(self, 'geo_correlation', 'cosine')
-        threshold = getattr(self, 'geo_box_threshold', 0.3)
-        topk = getattr(self, 'geo_topk', 10)
-        presence_thresh = getattr(self, 'geo_presence_threshold', 0.0)
-        fusion = getattr(self, 'geo_fusion', 'mean')
-
-        prompt_geo = {}
-
-        for prompt_idx in range(self.num_prompts):
-            class_id = self.prompts["indices"][prompt_idx]
-
-            # Skip background class: geo points/boxes for vague background
-            # may introduce noise; let text-only prompt handle it.
-            skip_bg = getattr(self, 'geo_skip_bg_idx', None)
-            if skip_bg is not None and class_id == skip_bg:
-                continue
-
-            if class_id not in self.visual_prototype_bank:
-                continue
-
-            if self.proto_multi_level:
-                # Multi-level fusion path
-                response = self._compute_fused_response(
-                    fpn_list, class_id, batch_size, correlation, fusion)
-
-                if response is None:
-                    continue
-
-                B, H, W = response.shape
-                device = response.device
-                dtype = response.dtype
-            else:
-                # Single-level path (original)
-                fpn_level = getattr(self, 'geo_fpn_level', -1)
-                fpn_feats = fpn_list[fpn_level]  # [B, 256, H, W]
-                B, C, H, W = fpn_feats.shape
-                device = fpn_feats.device
-                dtype = fpn_feats.dtype
-
-                feats_flat = fpn_feats.flatten(2)  # [B, 256, H*W]
-                proto = self.visual_prototype_bank[class_id].to(device, dtype=dtype)
-
-                if proto.shape[0] > 1:
-                    # Multi-prototype: extract topk points from EACH sub-prototype
-                    # then merge. Total points = topk * K_subprototypes.
-                    if geo_mode == "geo_point":
-                        result = self._build_multi_proto_point_prompt(
-                            feats_flat, proto, B, H, W, device, dtype,
-                            topk, presence_thresh, method=correlation)
-                        if result is not None:
-                            prompt_geo[prompt_idx] = result
-                        continue
-                    else:
-                        # geo_box: fall back to max-fused response
-                        K = proto.shape[0]
-                        responses = []
-                        for k in range(K):
-                            proto_k = proto[k].flatten(1)
-                            resp_k = self._compute_response_map(
-                                feats_flat, proto_k, B, H, W, method=correlation)
-                            responses.append(resp_k)
-                        response = torch.stack(responses, dim=0).max(dim=0)[0]
-                else:
-                    proto_flat = proto.flatten(1)  # [1, 256]
-                    response = self._compute_response_map(
-                        feats_flat, proto_flat, B, H, W, method=correlation)  # [B, H, W]
-
-            # Presence filtering: skip if max response too low
-            max_response = response.view(B, -1).max(dim=1)[0]  # [B]
-            if (max_response < presence_thresh).all():
-                continue
-
-            # Build geometric prompt based on mode
-            if geo_mode == "geo_box":
-                prompt_geo[prompt_idx] = self._build_box_prompt(
-                    response, B, H, W, device, dtype, threshold)
-            elif geo_mode == "geo_point":
-                prompt_geo[prompt_idx] = self._build_point_prompt(
-                    response, B, H, W, device, dtype, topk, max_response, presence_thresh)
-            else:
-                continue
-
-        return prompt_geo
-
-    def _compute_fused_response(self, fpn_list, class_id, batch_size, correlation, fusion):
-        """Compute fused multi-level response map for one class.
-
-        For each level, computes response map, upsamples all to finest resolution,
-        then fuses via mean.
-
-        Args:
-            fpn_list: backbone FPN feature list
-            class_id: class to compute response for
-            batch_size: batch size
-            correlation: correlation method
-            fusion: fusion method (currently only "mean")
-
-        Returns:
-            fused response: [B, H_finest, W_finest] or None if no valid levels
-        """
-        proto_dict = self.visual_prototype_bank[class_id]
-
-        responses_list = []
-        for level in self.proto_levels:
-            if level not in proto_dict:
-                continue
-            fpn_feats = fpn_list[level]
-            if fpn_feats is None:
-                continue
-
-            B_lv, C_lv, H_lv, W_lv = fpn_feats.shape
-            device = fpn_feats.device
-            dtype = fpn_feats.dtype
-
-            feats_flat = fpn_feats.flatten(2)  # [B, 256, H*W]
-            proto = proto_dict[level].to(device, dtype=dtype)
-            proto_flat = proto.flatten(1)  # [1, 256]
-
-            resp = self._compute_response_map(
-                feats_flat, proto_flat, B_lv, H_lv, W_lv, method=correlation)  # [B, H, W]
-            responses_list.append(resp)
-
-        if not responses_list:
-            return None
-
-        # Find finest resolution
-        finest_idx = max(range(len(responses_list)),
-                         key=lambda i: max(responses_list[i].shape[1:]))
-        finest_H, finest_W = responses_list[finest_idx].shape[1:]
-
-        # Upsample all to finest resolution and average
-        upsampled = []
-        for resp in responses_list:
-            h, w = resp.shape[1], resp.shape[2]
-            if h != finest_H or w != finest_W:
-                resp_up = F.interpolate(
-                    resp.unsqueeze(1).float(), (finest_H, finest_W),
-                    mode='bilinear', align_corners=False
-                ).to(resp.dtype).squeeze(1)
-                upsampled.append(resp_up)
-            else:
-                upsampled.append(resp)
-
-        stacked = torch.stack(upsampled, dim=0)  # [num_levels, B, H, W]
-        fused = stacked.mean(dim=0)  # [B, H, W]
-
-        return fused
-
-    def _compute_response_map(self, feats_flat, proto_flat, B, H, W, method="cosine"):
-        """Compute response map between spatial features and prototype.
-
-        Args:
-            feats_flat: [B, 256, H*W] spatial features
-            proto_flat: [1, 256] prototype
-            B, H, W: batch, height, width
-            method: correlation method
-
-        Returns:
-            response: [B, H, W] response map
-        """
-        device, dtype = feats_flat.device, feats_flat.dtype
-
-        if method == "cosine":
-            feats_norm = F.normalize(feats_flat, p=2, dim=1)   # [B, 256, H*W]
-            proto_norm = F.normalize(proto_flat, p=2, dim=1)   # [1, 256]
-            response = torch.bmm(proto_norm.unsqueeze(0).expand(B, -1, -1), feats_norm)
-            response = response.view(B, H, W)
-
-        elif method == "dot":
-            # Raw dot product (no normalization, preserves magnitude)
-            response = torch.bmm(proto_flat.unsqueeze(0).expand(B, -1, -1), feats_flat)
-            response = response.view(B, H, W)
-
-        elif method == "euclidean_inv":
-            # Inverse euclidean distance: 1 / (1 + ||f - p||)
-            proto_expanded = proto_flat.unsqueeze(0).expand(B, -1, -1)  # [B, 256, H*W]
-            diff = feats_flat - proto_expanded  # [B, 256, H*W]
-            dist = diff.norm(dim=1)  # [B, H*W]
-            response = (1.0 / (1.0 + dist)).view(B, H, W)
-
-        elif method == "channel_attn":
-            # Channel-wise attention: prototype as channel weights
-            # proto [1, 256] -> weights, apply softmax
-            weights = F.softmax(proto_flat, dim=1)  # [1, 256]
-            # feats [B, 256, H*W] -> weighted sum across channels
-            response = (feats_flat * weights.unsqueeze(0).unsqueeze(-1)).sum(dim=1)
-            response = response.view(B, H, W)
-
-        else:
-            raise ValueError(f"Unknown correlation method: {method}")
-
-        return response
-
-    def _build_box_prompt(self, response, B, H, W, device, dtype, threshold):
-        """Build a box geometric prompt from response map.
-
-        Args:
-            response: [B, H, W] response map
-            B, H, W: dimensions
-            device, dtype: torch device and dtype
-            threshold: binarization threshold
-
-        Returns:
-            Prompt object with box embeddings
-        """
-        from sam3.model.geometry_encoders import Prompt
-
-        binary_mask = (response > threshold).float()  # [B, H, W]
-        boxes_xyxy = self._masks_to_boxes(binary_mask)  # [B, 4]
-
-        valid_mask = (boxes_xyxy[:, 2] > boxes_xyxy[:, 0]) & (boxes_xyxy[:, 3] > boxes_xyxy[:, 1])
-
-        if valid_mask.any():
-            x1, y1, x2, y2 = boxes_xyxy.unbind(dim=1)
-            boxes_cxcywh = torch.stack([
-                ((x1 + x2) / 2) / W,
-                ((y1 + y2) / 2) / H,
-                (x2 - x1) / W,
-                (y2 - y1) / H,
-            ], dim=1).clamp(0, 1)
-            for b in range(B):
-                if not valid_mask[b]:
-                    boxes_cxcywh[b] = torch.tensor([0.5, 0.5, 1.0, 1.0], device=device, dtype=dtype)
-        else:
-            boxes_cxcywh = torch.tensor([[0.5, 0.5, 1.0, 1.0]], device=device, dtype=dtype)
-            boxes_cxcywh = boxes_cxcywh.expand(B, -1)
-
-        return Prompt(
-            box_embeddings=boxes_cxcywh.unsqueeze(0),  # [1, B, 4]
-            box_mask=torch.zeros(B, 1, dtype=torch.bool, device=device),
-            box_labels=torch.ones(1, B, dtype=torch.long, device=device),
-        )
-
-    def _build_multi_proto_point_prompt(self, feats_flat, proto, B, H, W,
-                                         device, dtype, topk, presence_thresh,
-                                         method="cosine"):
-        """Build point prompt from multiple sub-prototypes.
-
-        Extracts topk points from EACH sub-prototype's response map independently,
-        then merges. Total points = topk * K_subprototypes.
-
-        Args:
-            feats_flat: [B, 256, H*W]
-            proto: [K, 1, 256] sub-prototypes
-            B, H, W: spatial dimensions
-            device, dtype: torch device and dtype
-            topk: points per sub-prototype
-            presence_thresh: min response to consider present
-            method: correlation method
-
-        Returns:
-            Prompt object with combined points from all sub-prototypes.
-        """
-        from sam3.model.geometry_encoders import Prompt
-
-        K = proto.shape[0]
-        all_points = []  # list of [N_valid, 2] per image
-        all_labels = []
-        any_present = torch.zeros(B, dtype=torch.bool, device=device)
-
-        for k in range(K):
-            proto_k = proto[k].flatten(1)  # [1, 256]
-            resp_k = self._compute_response_map(
-                feats_flat, proto_k, B, H, W, method=method)  # [B, H, W]
-            max_resp_k = resp_k.view(B, -1).max(dim=1)[0]  # [B]
-            any_present = any_present | (max_resp_k >= presence_thresh)
-
-            for b in range(B):
-                if max_resp_k[b] < presence_thresh:
-                    continue
-                resp = resp_k[b]
-                flat = resp.flatten()
-                k_topk = min(topk, H * W)
-                topk_vals, topk_idx = flat.topk(k_topk)
-                y_idx = (topk_idx // W).float() / H
-                x_idx = (topk_idx % W).float() / W
-                pts = torch.stack([x_idx, y_idx], dim=1).clamp(0, 1)  # [topk, 2]
-                if b < len(all_points):
-                    all_points[b] = torch.cat([all_points[b], pts], dim=0)
-                    all_labels[b] = torch.cat([all_labels[b],
-                                               torch.ones(pts.shape[0], dtype=torch.long, device=device)])
-                else:
-                    all_points.append(pts)
-                    all_labels.append(torch.ones(pts.shape[0], dtype=torch.long, device=device))
-
-        # Fill in missing batch entries
-        while len(all_points) < B:
-            all_points.append(torch.zeros(0, 2, device=device, dtype=dtype))
-            all_labels.append(torch.zeros(0, dtype=torch.long, device=device))
-
-        if any_present.sum() == 0:
-            return None
-
-        max_pts = max(p.shape[0] for p in all_points)
-        if max_pts == 0:
-            return Prompt()
-
-        points = torch.zeros(max_pts, B, 2, device=device, dtype=dtype)
-        point_labels = torch.zeros(max_pts, B, dtype=torch.long, device=device)
-        point_mask = torch.ones(B, max_pts, dtype=torch.bool, device=device)
-
-        for b in range(B):
-            n = all_points[b].shape[0]
-            points[:n, b, :] = all_points[b]
-            point_labels[:n, b] = all_labels[b]
-            point_mask[b, :n] = False
-
-        return Prompt(
-            point_embeddings=points,
-            point_mask=point_mask,
-            point_labels=point_labels,
-        )
-
-    def _build_point_prompt(self, response, B, H, W, device, dtype, topk,
-                             max_response, presence_thresh):
-        """Build a point geometric prompt from response map.
-
-        Args:
-            response: [B, H, W] response map
-            B, H, W: dimensions
-            device, dtype: torch device and dtype
-            topk: number of points to select
-            max_response: [B] max response per image
-            presence_thresh: minimum response to consider present
-
-        Returns:
-            Prompt object with point embeddings, or empty Prompt if absent.
-        """
-        from sam3.model.geometry_encoders import Prompt
-
-        all_points = []
-        all_labels = []
-        N_points = topk
-        point_mode = getattr(self, 'geo_point_mode', 'centroid')
-
-        for b in range(B):
-            if max_response[b] < presence_thresh:
-                pts = torch.full((N_points, 2), 0.5, device=device, dtype=dtype)
-                all_points.append(pts)
-                all_labels.append(torch.ones(N_points, dtype=torch.long, device=device))
-            else:
-                resp_np = response[b].cpu().numpy()  # [H, W]
-
-                if point_mode == "topk":
-                    pts = self._select_points_topk(resp_np, H, W, topk)
-                else:  # centroid
-                    pts = self._select_points_centroid(resp_np, H, W, topk)
-
-                pts = torch.as_tensor(pts, device=device, dtype=dtype)
-                pts = pts.clamp(0, 1)
-
-                all_points.append(pts)
-                all_labels.append(torch.ones(pts.shape[0], dtype=torch.long, device=device))
-
-        max_pts = max(p.shape[0] for p in all_points)
-        if max_pts == 0:
-            return Prompt()
-
-        points = torch.zeros(max_pts, B, 2, device=device, dtype=dtype)
-        point_labels = torch.zeros(max_pts, B, dtype=torch.long, device=device)
-        point_mask = torch.ones(B, max_pts, dtype=torch.bool, device=device)
-
-        for b in range(B):
-            n = all_points[b].shape[0]
-            points[:n, b, :] = all_points[b]
-            point_labels[:n, b] = all_labels[b]
-            point_mask[b, :n] = False  # valid = not masked
-
-        return Prompt(
-            point_embeddings=points,
-            point_mask=point_mask,
-            point_labels=point_labels,
-        )
 
     def _select_points_topk(self, resp_np, H, W, topk):
         """Select global top-K highest response locations with spatial suppression."""

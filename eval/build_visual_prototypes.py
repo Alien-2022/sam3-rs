@@ -67,51 +67,41 @@ def parse_args():
     parser.add_argument("--output", type=str, default="outputs/visual_prototypes/potsdam.pt",
                         help="Output path for prototype bank")
     parser.add_argument("--load_bank", type=str, default=None,
-                        help="Load SAM3 FPN prototype bank from .pt file (for geo_box/geo_point/pixel_attn modes)")
+                        help="Load SAM3 FPN prototype bank from .pt file")
     parser.add_argument("--no_bank", action="store_true",
                         help="Run evaluation without visual prototype bank (baseline)")
     parser.add_argument("--dinov3_bank", type=str, default=None,
                         help="Load DINOv3 prototype bank from .pt file (for dinov3_geo_point mode)")
     parser.add_argument("--eval", action="store_true", help="Run evaluation after building")
-    parser.add_argument("--mode", type=str, default="geo_point",
-                        choices=["geo_box", "geo_point", "pixel_attn", "dinov3_geo_point"],
-                        help="Injection mode: "
-                             "'geo_box' (bounding boxes from response maps), "
-                             "'geo_point' (points from response maps, default), "
-                             "'pixel_attn' (spatial attention on backbone_fpn[0] before PixelDecoder), "
-                             "'dinov3_geo_point' (use DINOv3 features for response map + geo points)")
-    parser.add_argument("--geo_threshold", type=float, default=0.3,
-                        help="Threshold for response map binarization in geo_box mode (default: 0.3)")
     parser.add_argument("--geo_topk", type=int, default=10,
                         help="Number of points in geo_point mode (default: 10)")
     parser.add_argument("--geo_point_mode", type=str, default="centroid",
                         choices=["centroid", "topk"],
                         help="Point selection strategy: "
                              "'centroid' = threshold response map, find connected components, "
-                             "compute weighted centroid per component (default, more robust for continuous features); "
-                             "'topk' = select global top-K highest response locations (original)")
+                             "compute weighted centroid per component (default); "
+                             "'topk' = select global top-K highest response locations")
     parser.add_argument("--geo_centroid_thresh_ratio", type=float, default=0.5,
                         help="Fraction of (min+max) range as threshold for centroid mode (default: 0.7). "
                              "Higher = stricter threshold = fewer but more confident regions.")
-    parser.add_argument("--geo_centroid_method", type=str, default="peak",
-                        choices=["weighted", "peak", "interior_peak"],
-                        help="Point selection within CC: 'weighted' (response-weighted centroid), "
-                             "'peak' (max response pixel), 'interior_peak' (response × distance-to-boundary)")
     parser.add_argument("--geo_centroid_min_area", type=int, default=4,
                         help="Minimum CC area in pixels to keep (default: 4)")
     parser.add_argument("--geo_topk_suppress_r", type=int, default=0,
                         help="Spatial suppression radius for topk mode (pixels). "
                              "After selecting a point, suppress response within this radius. "
                              "0=disabled (default). Recommended: 5-10%% of feature map size.")
+    parser.add_argument("--geo_centroid_method", type=str, default="peak",
+                        choices=["peak", "weighted", "interior_peak"],
+                        help="Point selection method in centroid mode: "
+                             "'peak' = max response pixel in CC (default), "
+                             "'weighted' = response-weighted centroid, "
+                             "'interior_peak' = response x distance-to-boundary")
     parser.add_argument("--geo_centroid_area_beta", type=float, default=0.0,
                         help="Area exponent for quality-aware CC ranking in centroid mode. "
                              "Score = mean_response * area^beta. beta=0 uses mean_resp only, "
                              "beta=1 uses total_weight (original). 0.3-0.5 recommended for "
                              "balancing large moderate-confidence vs small high-confidence regions. "
                              "0=disabled (default, uses total_weight like before).")
-    parser.add_argument("--geo_correlation", type=str, default="cosine",
-                        choices=["cosine", "dot", "euclidean_inv", "channel_attn"],
-                        help="Correlation method for response map (default: cosine)")
     parser.add_argument("--geo_presence", type=float, default=0.0,
                         help="Min max-response to add geo prompt; 0=always add (default: 0.0)")
     parser.add_argument("--geo_presence_sam3_thresh", type=float, default=0.0,
@@ -125,39 +115,33 @@ def parse_args():
                              "'max' = subtract max of other classes; "
                              "'weighted' = subtract weighted mean using inter-class prototype similarity; "
                              "'exclusive' = winner-take-all: each pixel only keeps the max-class response")
-    parser.add_argument("--geo_resp_fusion_alpha", type=float, default=0.0,
-                        help="DINOv3 response map fusion weight (after dual-head fusion). "
-                             "0=disabled (default). "
-                             "final_logits = (1-alpha)*sam3_logits + alpha*response_map. "
-                             "Response maps are upsampled to SAM3 output resolution and scale-normalized. "
-                             "Recommended: 0.1-0.3")
-    parser.add_argument("--geo_resp_fusion_thresh", type=float, default=0.5,
-                        help="Response map threshold (fraction of scale) for masking before fusion. "
-                             "Higher = only high-confidence response pixels participate. Default: 0.5")
+    parser.add_argument("--geo_neg_topk", type=int, default=0,
+                        help="Number of negative points from other classes' response maps (default: 0, disabled). "
+                             "Each class gets positive points + top-K points from other classes as negative.")
+    parser.add_argument("--geo_neg_independent", action="store_true", default=False,
+                        help="Inject negative points independently of positive point confidence. "
+                             "When enabled, negative points are generated even when max_response < "
+                             "geo_presence_threshold (i.e., no confident positive points). This leverages "
+                             "the high accuracy of negative points (>94%) to suppress cross-class confusion "
+                             "for classes with low positive-point accuracy.")
     parser.add_argument("--geo_only_classes", type=str, default=None,
                         help="Comma-separated class IDs to inject geo prompts for (others get text-only). "
-                             "E.g. '3,4' for grass+tree only. Useful for per-class diagnostic. (default: all)")
+                             "E.g. '3,4' for grass+tree only. (default: all)")
     parser.add_argument("--geo_only_mode", action="store_true", default=False,
-                        help="Geo-only mode (requires geo_presence_sam3_thresh > 0): "
-                             "When SAM3 presence < threshold + DINOv3 confident → use point prompt ONLY (no text). "
-                             "When both signals low → skip class entirely. "
-                             "Default: text + geo point for two-pass rerun.")
-    parser.add_argument("--geo_fpn_level", type=int, default=-1,
-                        help="FPN level for response map (single-level): -1=72x72, -2=144x144, -3=288x288 (default: -1)")
+                        help="Geo-only mode: point prompt ONLY (no text) in two-pass rerun.")
     parser.add_argument("--feat_level", type=int, default=-1,
                         help="FPN level for prototype extraction: -1=72x72(semantic), -2=144x144, 0=288x288(fine) (default: -1)")
     parser.add_argument("--feat_levels", type=str, default=None,
                         help="Comma-separated FPN levels for multi-level extraction, e.g. '-1,-2,0'. Overrides --feat_level")
     parser.add_argument("--feat_source", type=str, default="backbone_fpn",
                         help="Feature source for prototype construction: 'backbone_fpn' (raw FPN), "
-                             "'pixel_decoder' (multi-scale fusion, 288x288), "
                              "'dinov3_sat' (DINOv3 ViT-L/16 SAT, 1024-dim) (default: backbone_fpn)")
     parser.add_argument("--dinov3_weights", type=str, default=None,
-                        help="Path to DINOv3 SAT model directory (for dinov3_sat feat_source or dinov3_geo_point mode). "
+                        help="Path to DINOv3 SAT model directory. "
                              "Default: weights/dinov3/sat_vit_L16")
     parser.add_argument("--dinov3_input_size", type=int, default=1008,
                         help="Input resolution for DINOv3 (must be multiple of 16). "
-                             "1008 → 63x63 patches (default: 1008)")
+                             "1008 -> 63x63 patches (default: 1008)")
     parser.add_argument("--num_clusters", type=int, default=1,
                         help="Max sub-prototypes per class via adaptive K-means (1=weighted avg, >1=auto-select K in [1,num_clusters] by silhouette score) (default: 1)")
     parser.add_argument("--label_offset", type=int, default=0,
@@ -167,20 +151,11 @@ def parse_args():
     parser.add_argument("--max_eval_images", type=int, default=0,
                         help="Max number of images to evaluate (0=all). For quick validation. (default: 0)")
     parser.add_argument("--batch_size", type=int, default=1,
-                        help="Batch size for batch inference (requires dinov3_geo_point mode, "
-                             "no sliding window). 1=single image (default). Recommended: 4-8.")
-    parser.add_argument("--fusion", type=str, default="mean",
-                        choices=["mean"],
-                        help="Multi-level fusion method: 'mean' (response-level average)")
+                        help="Batch size for batch inference (1=single image). Recommended: 4-8.")
     parser.add_argument("--skip_bg_idx", type=int, default=None,
-                        help="Skip geo prompt injection for this class_id (e.g. 0 for background). "
-                             "Background is vague; text-only prompt may work better.")
-    parser.add_argument("--pixel_attn_alpha", type=float, default=10.0,
-                        help="Sharpness of sigmoid for pixel_attn mode (default: 10.0). "
-                             "Higher = sharper transition, lower = softer attention.")
-    parser.add_argument("--pixel_attn_threshold", type=float, default=0.3,
-                        help="Center of sigmoid for pixel_attn mode (default: 0.3). "
-                             "Response values above this get amplified, below get suppressed.")
+                        help="Skip geo prompt injection for this class_id (e.g. 0 for background).")
+    parser.add_argument("--fusion", type=str, default="mean",
+                        help="Multi-level fusion method for prototype building: 'mean'")
     return parser.parse_args()
 
 
@@ -299,47 +274,42 @@ def main():
 
         is_multi = isinstance(next(iter(prototypes.values())), dict)
 
-    # For geo modes, pass multi-level bank directly (core.py handles fusion).
-    # For non-geo modes, flatten to single level.
-    if is_multi and args.eval and args.mode not in ("geo_box", "geo_point", "pixel_attn", "dinov3_geo_point"):
+    # For non-geo eval modes (no prototype bank), flatten multi-level bank to single level.
+    if is_multi and args.eval and not args.dinov3_bank:
         selected_level = int(args.feat_levels.split(",")[0].strip()) if args.feat_levels else args.feat_level
         flat_protos = {}
         for k, v in prototypes.items():
             flat_protos[k] = v.get(selected_level, next(iter(v.values())))
-        print(f"  Flattened multi-level bank to level {selected_level} for non-geo mode")
+        print(f"  Flattened multi-level bank to level {selected_level}")
         prototypes = flat_protos
 
     # Apply visual prototype bank to engine
     if prototypes is not None:
         print("\nApplying Visual Prototype Bank to segmentor...")
         segmentor.engine.set_visual_prototype_bank(
-            prototypes, mode=args.mode,
-            geo_threshold=args.geo_threshold, geo_topk=args.geo_topk,
-            geo_correlation=args.geo_correlation, geo_presence_threshold=args.geo_presence,
-            geo_fpn_level=args.geo_fpn_level,
-            geo_fusion=args.fusion,
+            prototypes,
+            geo_topk=args.geo_topk,
+            geo_presence_threshold=args.geo_presence,
             geo_skip_bg_idx=args.skip_bg_idx,
-            pixel_attn_alpha=args.pixel_attn_alpha,
-            pixel_attn_threshold=args.pixel_attn_threshold,
             geo_point_mode=args.geo_point_mode,
             geo_centroid_thresh_ratio=args.geo_centroid_thresh_ratio,
-            geo_centroid_method=args.geo_centroid_method,
             geo_centroid_min_area=args.geo_centroid_min_area,
             geo_topk_suppress_r=args.geo_topk_suppress_r,
             geo_centroid_area_beta=args.geo_centroid_area_beta,
+            geo_centroid_method=args.geo_centroid_method,
             dinov3_weights=args.dinov3_weights,
             dinov3_input_size=args.dinov3_input_size,
             geo_presence_sam3_thresh=args.geo_presence_sam3_thresh,
             dinov3_layers=dinov3_bank_layers if args.dinov3_bank else None,
             geo_competition=args.geo_competition,
+            geo_neg_topk=args.geo_neg_topk,
             inter_class_sim=dinov3_bank_inter_sim if args.dinov3_bank else None,
             geo_only_classes=[int(x.strip()) for x in args.geo_only_classes.split(",")] if args.geo_only_classes else None,
             geo_only_mode=args.geo_only_mode,
-            geo_resp_fusion_alpha=args.geo_resp_fusion_alpha,
-            geo_resp_fusion_thresh=args.geo_resp_fusion_thresh,
+            geo_neg_independent=args.geo_neg_independent,
         )
         print(f"  Classes with prototypes: {len(prototypes)}/{num_classes}, "
-              f"mode={args.mode}, multi_level={is_multi}"
+              f"multi_level={is_multi}"
               f"{f', fusion={args.fusion}' if is_multi else ''}")
     else:
         print("\nNo visual prototype bank (baseline mode)")
@@ -374,7 +344,7 @@ def main():
             all_gt_masks.append(batch["mask"][0])
 
         use_batch = (args.batch_size > 1
-                     and args.mode == "dinov3_geo_point"
+                     and args.dinov3_bank is not None
                      and seg_cfg.get("slide_crop_size", 0) == 0)
         if use_batch:
             print(f"  Using batch inference: batch_size={args.batch_size}, "
@@ -453,6 +423,18 @@ if __name__ == "__main__":
     # python workspace/core/sam3-rs/eval/build_visual_prototypes.py --config workspace/core/sam3-rs/eval/configs/potsdam_A2_extended.yaml --feat_source dinov3_sat --dinov3_input_size 2048 --output workspace/core/sam3-rs/outputs/visual_prototypes/potsdam_dinov3.pt --dinov3_weights weights/dinov3/sat_vit_L16 --num_calib 4 --max_crops 200
     # eval potsdam
     # python workspace/core/sam3-rs/eval/build_visual_prototypes.py --config workspace/core/sam3-rs/eval/configs/potsdam_A2_extended.yaml --dinov3_bank workspace/core/sam3-rs/outputs/visual_prototypes/potsdam_dinov3.pt --mode dinov3_geo_point --eval --dinov3_weights workspace/core/sam3-rs/weights/dinov3/sat_vit_L16 --dinov3_input_size 2048 --geo_topk 3 --geo_point_mode centroid --geo_presence 0.7 --geo_presence_sam3_thresh 0.5
+    # python workspace/core/sam3-rs/eval/build_visual_prototypes.py \
+    # --config workspace/core/sam3-rs/eval/configs/potsdam_A2_extended.yaml \
+    # --dinov3_bank workspace/core/sam3-rs/outputs/visual_prototypes/potsdam_dinov3.pt \
+    # --eval \
+    # --dinov3_weights workspace/core/sam3-rs/weights/dinov3/sat_vit_L16 \
+    # --dinov3_input_size 2048 \
+    # --geo_topk 3 --geo_topk_suppress_r 10 --geo_neg_topk 3 \
+    # --geo_point_mode centroid --geo_centroid_area_beta 0.3 \
+    # --geo_competition exclusive \
+    # --geo_presence_sam3_thresh 0.7 --geo_presence 0.1 \
+    # --geo_only_classes 3,4 --max_eval_images 2
+
 
     # openearthmap
     # python eval/build_visual_prototypes.py --config eval/configs/openearthmap_A2_extended.yaml --load_bank outputs/visual_prototypes/openearthmap_cluster.pt  --geo_fpn_level 2 --geo_topk 1 --eval
@@ -471,4 +453,9 @@ if __name__ == "__main__":
 
     # run loveda with vpb
     # python workspace/core/sam3-rs/eval/build_visual_prototypes.py     --config workspace/core/sam3-rs/eval/configs/loveda_A2_extended.yaml     --dinov3_bank workspace/core/sam3-rs/outputs/visual_prototypes/loveda_dinov3_v2.pt     --mode dinov3_geo_point     --eval     --dinov3_weights workspace/core/sam3-rs/weights/dinov3/sat_vit_L16     --dinov3_input_size 1024     --geo_topk 3     --geo_point_mode topk --geo_competition weighted    --geo_presence_sam3_thresh 0.7  --geo_presence 0.2 --geo_only_classes 0,4,5,6 --max_eval_images 0 --batch_size 4
+    # text only mode
+    # python workspace/core/sam3-rs/eval/build_visual_prototypes.py     --config workspace/core/sam3-rs/eval/configs/loveda_A2_extended.yaml --no_bank --eval --max_eval_images 50 --batch_size 4
+    
+    # build vaihingen vpb with dinov3
+    # python assistant/build_dinov3_prototypes.py \ --config workspace/core/sam3-rs/eval/configs/vaihingen_A2_extended.yaml \ --output workspace/core/sam3-rs/outputs/visual_prototypes/vaihingen_dinov3.pt \ --input_size 1024 \ --crop_size 1024 --stride 512 \ --label_offset 0 \ --num_calib 4 --max_crops 200
     main()

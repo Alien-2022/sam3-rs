@@ -1,0 +1,8 @@
+barren,bareland
+grass
+pavement
+road
+tree,forest
+water,lake
+farmland,crop
+building,roof
