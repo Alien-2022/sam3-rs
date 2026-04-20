@@ -1,0 +1,8 @@
+barren land,wasteland,undeveloped land,bare ground,unvegetated area
+pastureland,grazing land,grassland,herbaceous range,open range
+urban area,built-up area,construction zone,infrastructure area,developed land
+highway,street,avenue,pathway,lane
+forest,woodland,timber,sapling,woody plant
+lake,river,ocean,stream,pond
+farmland,cropland,cultivated land,agricultural field,farming area
+structure,edifice,facility,abode,tenement

@@ -1,0 +1,7 @@
+surroundings
+structure,construction
+street,highway
+sea
+ground,dirt
+woods,woodland
+farming,crop

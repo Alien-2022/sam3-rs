@@ -47,7 +47,7 @@ segmentor:
   # Experimental Features (may be removed)
   # ========================================
   analyze_presence_score: false
-  presence_score_mode: "before_fusion"
+  presence_score_mode: "after_fusion"
 
   # ========================================
   # Statistics Analysis

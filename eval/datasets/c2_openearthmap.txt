@@ -1,0 +1,8 @@
+bare ground
+grassland
+urban area
+highway,street
+forest
+lake,river
+farmland,cropland
+structure

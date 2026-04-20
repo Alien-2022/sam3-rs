@@ -1,0 +1,7 @@
+background
+buildings,roof,house
+roads,street
+water body,pond
+bareland,soil
+forest,tree
+agricultural land,crops

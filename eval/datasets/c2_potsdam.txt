@@ -1,0 +1,6 @@
+mess
+nonporous surfaces,hard surfaces,sealed surfaces
+structure,construction
+grass,shrubs,ground cover
+wood
+automobile,vehicle

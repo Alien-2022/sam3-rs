@@ -454,7 +454,7 @@ def main():
     bpe_path = os.path.join(script_dir, "sam3", "assets", "bpe_simple_vocab_16e6.txt.gz")
 
     # Test image path
-    test_image_path = os.path.join(SAM_RS_DIR, "test/top_potsdam_2_12_RGB.png")
+    test_image_path = os.path.join(SAM_RS_DIR, "test/top_potsdam_2_10_RGB.png")
 
 
     # Prompts file for multi-class segmentation
@@ -479,12 +479,12 @@ def main():
         checkpoint_path=checkpoint_path,
         bpe_path=bpe_path,
         device="cuda",
-        confidence_threshold=0.5,
-        prob_threshold=0.5,
+        confidence_threshold=0.2,
+        prob_threshold=0.1,
         use_semantic_head=True,
         use_instance_head=True,
         use_presence_score=True,
-        slide_crop_size=2048,        # No sliding window for small images
+        slide_crop_size=0,        # No sliding window for small images
         slide_stride=1024,
         prompts_file=prompts_file,
         use_prompted_background=use_prompted_background,

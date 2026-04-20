@@ -28,7 +28,7 @@ segmentor:
   weight_key: null
 
   analyze_presence_score: false
-  presence_score_mode: "before_fusion"
+  presence_score_mode: "after_fusion"
   analyze_statistics: false
   compute_boundary_iou: false
   debug_memory: false

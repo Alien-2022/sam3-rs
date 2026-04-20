@@ -208,6 +208,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-batch", action="store_false", dest="use_batch", help="Use serial predict_single inference"
     )
+    parser.add_argument(
+        "--max-images", type=int, default=None, help="Max number of images to evaluate (for quick testing)"
+    )
     parser.set_defaults(use_batch=True)
     return parser.parse_args()
 
@@ -303,6 +306,7 @@ def main() -> None:
     t_infer = 0
     t_eval = 0
 
+    t_total_start = time.time()
     t_start_loop = time.time()
     for batch in loader:
         t_data_ready = time.time()
@@ -351,8 +355,9 @@ def main() -> None:
             print(f"[eval] {processed}/{total_imgs} images done | Data: {t_data/(processed/8+1e-6):.3f}s/b | Infer: {t_infer/processed:.3f}s/i | Eval: {t_eval/processed:.3f}s/i", end="\r")
         t_eval += (time.time() - t_eval_start)
 
-        # if processed >= 100:
-        #     break
+        if args.max_images is not None and processed >= args.max_images:
+            print(f"\n[eval] Reached max_images={args.max_images}, stopping early.")
+            break
         t_start_loop = time.time()
 
         # 定期清理 GPU 缓存 - 每 5 个 batch 清理一次，避免频繁清理影响性能
@@ -447,7 +452,14 @@ def main() -> None:
             }
 
         cur_time=time.strftime("%m%d_%H%M", time.localtime())
+        t_total_elapsed = time.time() - t_total_start
         scores_with_detail["run_time"] = cur_time
+        scores_with_detail["elapsed_seconds"] = round(t_total_elapsed, 1)
+        scores_with_detail["timing_per_image"] = {
+            "data_loading_s": round(t_data / processed, 3),
+            "inference_s": round(t_infer / processed, 3),
+            "eval_save_s": round(t_eval / processed, 3),
+        }
         # Create directory if it doesn't exist
         os.makedirs(os.path.dirname(metrics_json), exist_ok=True)
         with open(metrics_json, "w", encoding="utf-8") as f:

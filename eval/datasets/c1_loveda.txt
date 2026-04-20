@@ -1,0 +1,7 @@
+setting,environment,context,backdrop,surroundings
+structure,edifice,facility,construction,architecture
+street,highway,avenue,lane,path
+liquid,moisture,aqua,fluid,sea
+earth,dirt,ground,substrate,loam
+woods,woodland,jungle,grove,timberland
+farming,agrarian,cultivation,crop,harvest

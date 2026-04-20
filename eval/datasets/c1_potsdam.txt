@@ -1,0 +1,6 @@
+mess,disarray,jumble,confusion,disorder
+hard surfaces,impermeable surfaces,sealed surfaces,nonporous surfaces,compact surfaces
+structure,edifice,construction,facility,establishment
+undergrowth,grass,shrubs,herbaceous layer,ground cover
+arboreal,woody plant,sapling,timber,wood
+automobile,motorcar,vehicle,auto,motor

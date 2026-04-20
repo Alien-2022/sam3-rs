@@ -26,12 +26,12 @@ segmentor:
   weight_key: null
 
   analyze_presence_score: false
-  presence_score_mode: "before_fusion"
+  presence_score_mode: "after_fusion"
   analyze_statistics: false
   compute_boundary_iou: false
   debug_memory: false
 
-  # Vaihingen 图像 ~2000x2500，用 1024/512 滑动窗口
+  # Vaihingen 图像 ~2000x2500，启用 1024/512 滑窗（与其他 vaihingen 配置统一）
   slide_crop_size: 1024
   slide_stride: 512
 

@@ -5,7 +5,7 @@ dataset:
   data_root: data/Potsdam
   img_dir: pre_slice/img
   mask_dir: pre_slice/mask
-  cls_file: cls_potsdam_llm_v2.txt
+  cls_file: cls_potsdam_llm_v3.txt
   ignore_index: 255
   reduce_zero_label: false
   data_key: null
@@ -13,7 +13,7 @@ dataset:
 segmentor:
   checkpoint_path: weights/sam3/sam3.pt
   bpe_path: bpe_simple_vocab_16e6.txt.gz
-  prompts_file: cls_potsdam_llm_v2.txt
+  prompts_file: cls_potsdam_llm_v3.txt
   # === A2: LLM 扩展提示词 + 固定阈值（与 A1 阈值一致） ===
   confidence_threshold: 0.2
   prob_threshold: 0.1
@@ -35,4 +35,4 @@ segmentor:
   slide_stride: 1024
 
 output:
-  metrics_json: outputs/metrics/potsdam_A2_extended.json
+  metrics_json: outputs/metrics/potsdam_A2_extended_V3.json

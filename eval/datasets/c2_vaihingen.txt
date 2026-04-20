@@ -1,0 +1,6 @@
+mess
+hard surfaces,paved surfaces
+structure,construction
+grass,shrub
+wood,evergreen
+automobile,vehicle
