@@ -131,6 +131,17 @@ def generate_random_colors(num_classes, seed=42, use_black_background=True):
 
 def save_prediction_mask(seg_pred, output_path):
     """
+    将预测掩码保存为灰度图像文件
+    
+    Args:
+        seg_pred (np.ndarray): 形状为 [H, W] 的 numpy 数组，包含类别 ID（segmentor 输出格式）
+        output_path (str): 掩码图像的保存路径
+    
+    Note:
+        直接保存 segmentor 的原始输出，不进行标签格式转换，保持与 prompts 文件一致
+        （0=背景，1=第一个类别，以此类推）。
+    """
+    """
     Save prediction mask (raw segmentor output).
 
     Args:
@@ -454,7 +465,7 @@ def main():
     bpe_path = os.path.join(script_dir, "sam3", "assets", "bpe_simple_vocab_16e6.txt.gz")
 
     # Test image path
-    test_image_path = os.path.join(SAM_RS_DIR, "test/top_potsdam_2_10_RGB.png")
+    test_image_path = os.path.join(SAM_RS_DIR, "test/2522.png")
 
 
     # Prompts file for multi-class segmentation
@@ -523,7 +534,7 @@ def main():
 
     img_name = os.path.splitext(os.path.basename(test_image_path))[0]
 
-    run_single_inference(segmentor, test_image_path, output_dir, img_name, save_heatmap=True, colors=colors, show_presence_scores=False)
+    run_single_inference(segmentor, test_image_path, output_dir, img_name, save_heatmap=False, colors=colors, show_presence_scores=False)
 
     # ============ Summary ============
 
